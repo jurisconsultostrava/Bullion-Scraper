@@ -5,7 +5,7 @@ import logging
 from urllib.parse import urlparse, urljoin
 from flask import Flask, request, jsonify, render_template, Response
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -30,16 +30,16 @@ FETCH_TIMEOUT = 20
 OZ_TO_G = 31.1034768
 
 METAL_KEYWORDS = {
-    "gold": ["gold", "au", "oro", "gold bar", "gold coin"],
-    "silver": ["silver", "ag", "argent", "silver bar", "silver coin"],
+    "gold": ["gold", "au", "oro"],
+    "silver": ["silver", "ag", "argent"],
     "platinum": ["platinum", "pt", "platin"],
     "palladium": ["palladium", "pd"],
     "rhodium": ["rhodium", "rh"],
 }
 
 CURRENCY_SYMBOLS = {
-    "$": "USD",
     "€": "EUR",
+    "$": "USD",
     "£": "GBP",
     "Kč": "CZK",
     "CHF": "CHF",
@@ -50,17 +50,27 @@ CURRENCY_SYMBOLS = {
     "NZD": "NZD",
 }
 
+# Short single-word menu labels to reject as product names
+MENU_JUNK_WORDS = {
+    "gold", "silver", "platinum", "palladium", "rhodium",
+    "learn", "about", "contact", "shipping", "storage", "supplies",
+    "new", "sale", "shop", "home", "more", "all", "buy",
+    "stonex bullion", "stonex", "apmex", "european mint", "bullionbypost",
+    "menu", "search", "cart", "account", "login", "register",
+    "help", "faq", "guide", "blog", "news", "press",
+}
+
 PRODUCT_URL_PATTERNS = re.compile(
     r"/(gold|silver|platinum|palladium|rhodium|bullion|bar|coin|round|product|buy|shop|item|"
     r"gold-bar|silver-bar|gold-coin|silver-coin|platinum-bar|palladium-bar|"
-    r"1-oz|5-oz|10-oz|1oz|kilo|ounce|troy)/",
+    r"1-oz|5-oz|10-oz|1oz|kilo|ounce|troy|fine-weight|gram)/",
     re.IGNORECASE,
 )
 
 JUNK_URL_PATTERNS = re.compile(
     r"/(blog|news|article|guide|help|faq|about|contact|shipping|returns|policy|"
     r"login|register|account|cart|checkout|wishlist|search|category|tag|sitemap|"
-    r"terms|privacy|legal|review|press|media|careers|partner)/",
+    r"terms|privacy|legal|review|press|media|careers|partner|learn)/",
     re.IGNORECASE,
 )
 
@@ -70,20 +80,21 @@ JUNK_URL_SUFFIXES = re.compile(
 )
 
 JUNK_TEXTS = re.compile(
-    r"(read more|learn more|click here|buy now|add to cart|view all|see all|"
-    r"subscribe|sign up|log in|register|back to top|share|print|email|tweet|facebook|"
-    r"follow us|contact us|about us|privacy policy|terms of service)",
+    r"^(read more|learn more|click here|buy now|add to cart|view all|see all|"
+    r"subscribe|sign up|log in|register|back to top|notify me|watchlist|"
+    r"share|print|email|tweet|facebook|follow us|contact us|about us|"
+    r"privacy policy|terms of service)$",
     re.IGNORECASE,
 )
+
 
 # ---------------------------------------------------------------------------
 # Vendor detection
 # ---------------------------------------------------------------------------
 
 def detect_vendor(url: str) -> str:
-    host = urlparse(url).netloc.lower()
-    host = host.replace("www.", "")
-    if "stonex" in host or "stonexbullion" in host:
+    host = urlparse(url).netloc.lower().replace("www.", "")
+    if "stonex" in host:
         return "stonex"
     if "europeanmint" in host or "european-mint" in host:
         return "europeanmint"
@@ -110,10 +121,11 @@ def infer_metal(text: str) -> str:
 def infer_weight(text: str) -> float | None:
     text_lower = text.lower()
     patterns = [
-        (r"(\d+(?:[.,]\d+)?)\s*(?:troy\s*)?oz(?:ounce)?", "oz"),
-        (r"(\d+(?:[.,]\d+)?)\s*kg", "kg"),
-        (r"(\d+(?:[.,]\d+)?)\s*g(?:ram)?(?!\w)", "g"),
-        (r"(\d+(?:[.,]\d+)?)\s*gram", "g"),
+        (r"(\d+(?:[.,]\d+)?)\s*(?:troy\s*)?oz(?:ounce)?(?!\w)", "oz"),
+        (r"(\d+(?:[.,]\d+)?)\s*kilo(?:gram)?", "kg"),
+        (r"(\d+(?:[.,]\d+)?)\s*kg(?!\w)", "kg"),
+        (r"(\d+(?:[.,]\d+)?)\s*gram(?:s)?", "g"),
+        (r"(\d+(?:[.,]\d+)?)\s*g(?!\w)", "g"),
     ]
     for pattern, unit in patterns:
         m = re.search(pattern, text_lower)
@@ -129,20 +141,33 @@ def infer_weight(text: str) -> float | None:
 
 
 def infer_currency(text: str) -> str:
-    for symbol, code in CURRENCY_SYMBOLS.items():
+    # Check symbols first (order matters: check multi-char before single-char)
+    for symbol in ["Kč", "CHF", "AUD", "CAD", "HKD", "SGD", "NZD", "€", "$", "£"]:
         if symbol in text:
-            return code
+            return CURRENCY_SYMBOLS[symbol]
     text_upper = text.upper()
-    for code in ["USD", "EUR", "GBP", "CZK", "CHF", "AUD", "CAD"]:
+    for code in ["EUR", "USD", "GBP", "CZK", "CHF", "AUD", "CAD"]:
         if code in text_upper:
             return code
     return ""
 
 
 def infer_price(text: str) -> float | None:
-    m = re.search(r"[\$€£]?\s?(\d{1,3}(?:[,.\s]\d{3})*(?:[.,]\d{1,2})?)", text)
+    # Remove thousands separators and extract first numeric price
+    # Handles: €13,755.99 or €1.355,19 or $4,196.81
+    m = re.search(r"[\$€£]?\s?(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?)", text)
     if m:
-        raw = m.group(1).replace(",", "").replace(" ", "")
+        raw = m.group(1)
+        # Disambiguate thousands vs decimal separator
+        # If last separator is comma and only 2 digits after → decimal comma
+        comma_last = re.search(r",(\d{2})$", raw)
+        dot_last = re.search(r"\.(\d{2})$", raw)
+        if comma_last:
+            raw = raw.replace(".", "").replace(",", ".")
+        elif dot_last:
+            raw = raw.replace(",", "")
+        else:
+            raw = raw.replace(",", "").replace(".", "")
         try:
             val = float(raw)
             if val > 0.5:
@@ -163,6 +188,18 @@ def infer_category(url: str) -> str:
     if "palladium" in path:
         return "palladium"
     return ""
+
+
+def is_junk_name(name: str) -> bool:
+    """Return True if name looks like a menu label rather than a product."""
+    stripped = name.strip().lower()
+    if stripped in MENU_JUNK_WORDS:
+        return True
+    if len(stripped) < 6:
+        return True
+    if JUNK_TEXTS.match(stripped):
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -189,17 +226,21 @@ def parse_structured_data(html: str) -> list[dict]:
                 items = data["@graph"]
         for item in items:
             if isinstance(item, dict) and item.get("@type") in ("Product", "product"):
-                products.append(_normalize_jsonld_product(item))
+                p = _normalize_jsonld_product(item)
+                if p:
+                    products.append(p)
             elif isinstance(item, dict) and item.get("@type") == "ListItem":
                 inner = item.get("item", {})
                 if isinstance(inner, dict) and inner.get("@type") == "Product":
-                    products.append(_normalize_jsonld_product(inner))
-    return [p for p in products if p]
+                    p = _normalize_jsonld_product(inner)
+                    if p:
+                        products.append(p)
+    return products
 
 
 def _normalize_jsonld_product(item: dict) -> dict | None:
     name = item.get("name", "")
-    if not name:
+    if not name or is_junk_name(name):
         return None
     offers = item.get("offers", {})
     if isinstance(offers, list):
@@ -220,7 +261,6 @@ def _normalize_jsonld_product(item: dict) -> dict | None:
     if isinstance(image, dict):
         image = image.get("url", "")
     url = item.get("url", "") or offers.get("url", "")
-    sku = item.get("sku", "")
     return {
         "_name": name,
         "_price": price,
@@ -228,7 +268,6 @@ def _normalize_jsonld_product(item: dict) -> dict | None:
         "_availability": availability,
         "_image": image,
         "_url": url,
-        "_sku": sku,
     }
 
 
@@ -243,16 +282,118 @@ def extract_metals(html: str) -> dict:
     metal_names = ["gold", "silver", "platinum", "palladium", "rhodium"]
     for metal in metal_names:
         pattern = re.compile(
-            rf"{metal}[^$€£\d]*([€$£]?\s?\d{{1,3}}(?:[,.]\d{{3}})*(?:[,.]\d{{1,2}})?)",
+            rf"{metal}[^$€£\d]{{0,30}}([€$£]?\s?\d{{1,3}}(?:[,.\s]\d{{3}})*(?:[,.\s]\d{{1,2}})?)",
             re.IGNORECASE,
         )
         m = pattern.search(text)
         if m:
             raw = m.group(1).strip()
             price = infer_price(raw)
-            if price:
+            if price and price > 1:
                 metals[metal] = {"price": price, "diff": None, "percent": None}
     return metals
+
+
+# ---------------------------------------------------------------------------
+# StoneX-specific parser  (TARGETED — anchored to product-thumb-body)
+# ---------------------------------------------------------------------------
+
+STONEX_BASE = "https://stonexbullion.com"
+
+
+def parse_stonex(html: str, url: str) -> list[dict]:
+    """
+    StoneX listing pages use Vue SSR. Real product cards are <a class="product-item ...">
+    that contain a <div class="product-thumb-body"> with:
+      - span.card-title         → product name
+      - div.product-thumb-description → weight (oz) + availability
+      - div.py-3               → price (first child of body with only this class)
+
+    Navigation dropdown items also use the same outer wrapper but LACK the
+    product-thumb-description div, so we use that as the filter gate.
+    """
+    vendor = "StoneX Bullion"
+    soup = BeautifulSoup(html, "lxml")
+    products = []
+
+    # Try structured data first
+    structured = parse_structured_data(html)
+    for raw in structured:
+        products.append(normalize_product(raw, vendor, url))
+
+    if products:
+        return deduplicate(products)
+
+    # Targeted StoneX selector
+    for a in soup.find_all("a", class_=lambda c: c and "product-item" in c):
+        body = a.find(class_="product-thumb-body")
+        if not body:
+            continue
+        desc_el = body.find(class_="product-thumb-description")
+        if not desc_el:
+            # Nav dropdown items lack this div — skip them
+            continue
+
+        # Name: prefer card-title, fall back to img alt
+        title_el = body.find(class_="card-title")
+        name = title_el.get_text(strip=True) if title_el else ""
+        if not name:
+            img = a.find("img")
+            name = img.get("alt", "") if img else ""
+        # StoneX separates brand with " | " — clean to readable form
+        name = " | ".join(p.strip() for p in name.split("|") if p.strip())
+        if is_junk_name(name):
+            continue
+
+        # Weight + availability from product-thumb-description
+        desc_text = desc_el.get_text(strip=True)
+        weight_g = infer_weight(desc_text)
+        availability = ""
+        m = re.search(r"Availability[:\s]*(\d+)", desc_text, re.IGNORECASE)
+        if m:
+            availability = f"In Stock ({m.group(1)})"
+        else:
+            # If no explicit availability count but product is listed it's likely in stock
+            availability = "In Stock"
+
+        # Price from the body child div with ONLY class "py-3"
+        price = None
+        currency = "EUR"
+        for child in body.children:
+            if not isinstance(child, Tag):
+                continue
+            child_classes = child.get("class") or []
+            if child_classes == ["py-3"]:
+                price_text = child.get_text(strip=True)
+                price = infer_price(price_text)
+                currency = infer_currency(price_text) or "EUR"
+                break
+
+        # Image
+        img = a.find("img")
+        image_url = ""
+        if img:
+            image_url = img.get("src", "") or img.get("data-src", "")
+        if image_url and not image_url.startswith("http"):
+            image_url = STONEX_BASE + image_url
+
+        # URL
+        href = a.get("href", "")
+        if href and not href.startswith("http"):
+            href = STONEX_BASE + href
+
+        raw = {
+            "_name": name,
+            "_price": price,
+            "_currency": currency,
+            "_availability": availability,
+            "_image": image_url,
+            "_url": href,
+            "_weight_g": weight_g,  # pre-parsed from description (avoids name ambiguity)
+        }
+        products.append(normalize_product(raw, vendor, url))
+
+    return deduplicate(products)
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +424,7 @@ def parse_generic_product_links(soup: BeautifulSoup, base_url: str) -> list[dict
         if not _is_product_url(href, base_url):
             continue
         text = a.get_text(separator=" ", strip=True)
-        if not text or JUNK_TEXTS.search(text) or len(text) < 5:
+        if not text or is_junk_name(text) or len(text) < 6:
             continue
         if len(text) > 200:
             continue
@@ -296,7 +437,7 @@ def parse_generic_product_links(soup: BeautifulSoup, base_url: str) -> list[dict
         seen.add(href)
         results.append({
             "_name": text,
-            "_price": None,
+            "_price": infer_price(text),
             "_currency": infer_currency(text),
             "_availability": "",
             "_image": image_url,
@@ -323,6 +464,7 @@ def parse_generic_product_cards(soup: BeautifulSoup, base_url: str) -> list[dict
                 cards.extend(found)
         except Exception:
             pass
+
     for card in cards:
         a_tag = card.find("a", href=True)
         if not a_tag:
@@ -334,18 +476,18 @@ def parse_generic_product_cards(soup: BeautifulSoup, base_url: str) -> list[dict
             continue
         if JUNK_URL_SUFFIXES.search(href):
             continue
+
         name_tag = (
             card.find(["h2", "h3", "h4", "h1"])
             or card.find("[class*='title']")
             or card.find("[class*='name']")
         )
-        name = ""
-        if name_tag:
-            name = name_tag.get_text(strip=True)
+        name = name_tag.get_text(strip=True) if name_tag else ""
         if not name:
             name = a_tag.get_text(strip=True)
-        if not name or len(name) < 5 or JUNK_TEXTS.search(name):
+        if is_junk_name(name):
             continue
+
         price_tag = card.find(
             class_=re.compile(r"price|cost|amount", re.IGNORECASE)
         ) or card.find(["strong", "b"], string=re.compile(r"[\d.,]+"))
@@ -355,6 +497,7 @@ def parse_generic_product_cards(soup: BeautifulSoup, base_url: str) -> list[dict
             price_text = price_tag.get_text(strip=True)
             price = infer_price(price_text)
             currency = infer_currency(price_text)
+
         img_tag = card.find("img")
         image_url = ""
         if img_tag:
@@ -365,8 +508,10 @@ def parse_generic_product_cards(soup: BeautifulSoup, base_url: str) -> list[dict
             )
             if image_url:
                 image_url = urljoin(base_url, image_url)
+
         avail_tag = card.find(class_=re.compile(r"stock|avail|availability", re.IGNORECASE))
         availability = avail_tag.get_text(strip=True) if avail_tag else ""
+
         seen.add(href)
         results.append({
             "_name": name,
@@ -390,9 +535,11 @@ def normalize_product(raw: dict, vendor: str, source_url: str) -> dict:
         url = urljoin(source_url, url)
     text_for_inference = f"{name} {url}"
     metal = infer_metal(text_for_inference)
-    weight_g = infer_weight(text_for_inference)
+    # Use pre-parsed weight if provided by vendor adapter (avoids picking up wrong
+    # numbers like "1g" from "100 x 1g" product names); fall back to name/URL inference
+    weight_g = raw.get("_weight_g") or infer_weight(text_for_inference)
     price = raw.get("_price")
-    currency = raw.get("_currency") or infer_currency(text_for_inference)
+    currency = raw.get("_currency") or infer_currency(text_for_inference) or None
     availability = raw.get("_availability", "")
     image_url = raw.get("_image", "")
     if image_url and not image_url.startswith("http"):
@@ -405,7 +552,7 @@ def normalize_product(raw: dict, vendor: str, source_url: str) -> dict:
         "metal": metal,
         "weight_g": weight_g,
         "price": price,
-        "currency": currency or None,
+        "currency": currency,
         "availability": availability,
         "url": url,
         "image_url": image_url,
@@ -424,39 +571,23 @@ def deduplicate(products: list[dict]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Vendor adapters
+# European Mint adapter
 # ---------------------------------------------------------------------------
-
-def parse_stonex(html: str, url: str) -> list[dict]:
-    vendor = "StoneX Bullion"
-    soup = BeautifulSoup(html, "lxml")
-    products = []
-    structured = parse_structured_data(html)
-    for raw in structured:
-        products.append(normalize_product(raw, vendor, url))
-    if not products:
-        cards = parse_generic_product_cards(soup, url)
-        for raw in cards:
-            products.append(normalize_product(raw, vendor, url))
-    if not products:
-        links = parse_generic_product_links(soup, url)
-        for raw in links:
-            products.append(normalize_product(raw, vendor, url))
-    return deduplicate(products)
-
 
 def parse_european_mint(html: str, url: str) -> list[dict]:
     vendor = "European Mint"
     soup = BeautifulSoup(html, "lxml")
     products = []
+
     structured = parse_structured_data(html)
     for raw in structured:
         products.append(normalize_product(raw, vendor, url))
+
     if not products:
-        for item in soup.select(".product-item, .products .product, li.item"):
+        for item in soup.select(".product-item, .products .product, li.item, [class*='product-cell']"):
             name_el = item.find(["h2", "h3", "h4", "a"])
             name = name_el.get_text(strip=True) if name_el else ""
-            if not name:
+            if is_junk_name(name):
                 continue
             a_el = item.find("a", href=True)
             href = urljoin(url, a_el["href"]) if a_el else url
@@ -478,25 +609,41 @@ def parse_european_mint(html: str, url: str) -> list[dict]:
                 "_url": href,
             }
             products.append(normalize_product(raw, vendor, url))
+
+    if not products:
+        cards = parse_generic_product_cards(soup, url)
+        for raw in cards:
+            products.append(normalize_product(raw, vendor, url))
+
     if not products:
         links = parse_generic_product_links(soup, url)
         for raw in links:
             products.append(normalize_product(raw, vendor, url))
+
     return deduplicate(products)
 
+
+# ---------------------------------------------------------------------------
+# APMEX adapter
+# ---------------------------------------------------------------------------
 
 def parse_apmex(html: str, url: str) -> list[dict]:
     vendor = "APMEX"
     soup = BeautifulSoup(html, "lxml")
     products = []
+
     structured = parse_structured_data(html)
     for raw in structured:
         products.append(normalize_product(raw, vendor, url))
+
     if not products:
-        for item in soup.select(".product-title, .item-description, [class*='productItem'], [data-product-id]"):
+        for item in soup.select(
+            "[class*='productItem'], [class*='product-item'], "
+            "[data-product-id], .item-description"
+        ):
             name_el = item.find(["h2", "h3", "h4", "span", "a"])
             name = name_el.get_text(strip=True) if name_el else item.get_text(strip=True)
-            if not name or len(name) < 5:
+            if is_junk_name(name):
                 continue
             a_el = item.find("a", href=True) or item.find_parent("a")
             href = urljoin(url, a_el["href"]) if a_el else url
@@ -517,31 +664,42 @@ def parse_apmex(html: str, url: str) -> list[dict]:
                 "_url": href,
             }
             products.append(normalize_product(raw, vendor, url))
+
     if not products:
         cards = parse_generic_product_cards(soup, url)
         for raw in cards:
             raw["_currency"] = raw.get("_currency") or "USD"
             products.append(normalize_product(raw, vendor, url))
+
     if not products:
         links = parse_generic_product_links(soup, url)
         for raw in links:
             raw["_currency"] = raw.get("_currency") or "USD"
             products.append(normalize_product(raw, vendor, url))
+
     return deduplicate(products)
 
+
+# ---------------------------------------------------------------------------
+# BullionByPost adapter
+# ---------------------------------------------------------------------------
 
 def parse_bullionbypost(html: str, url: str) -> list[dict]:
     vendor = "BullionByPost"
     soup = BeautifulSoup(html, "lxml")
     products = []
+
     structured = parse_structured_data(html)
     for raw in structured:
         products.append(normalize_product(raw, vendor, url))
+
     if not products:
-        for item in soup.select(".product-cell, .listing-item, .product-listing li, [class*='productCell']"):
+        for item in soup.select(
+            ".product-cell, .listing-item, .product-listing li, [class*='productCell']"
+        ):
             name_el = item.find(["h2", "h3", "h4", "a"])
             name = name_el.get_text(strip=True) if name_el else ""
-            if not name:
+            if is_junk_name(name):
                 continue
             a_el = item.find("a", href=True)
             href = urljoin(url, a_el["href"]) if a_el else url
@@ -562,35 +720,46 @@ def parse_bullionbypost(html: str, url: str) -> list[dict]:
                 "_url": href,
             }
             products.append(normalize_product(raw, vendor, url))
+
     if not products:
         cards = parse_generic_product_cards(soup, url)
         for raw in cards:
             raw["_currency"] = raw.get("_currency") or "GBP"
             products.append(normalize_product(raw, vendor, url))
+
     if not products:
         links = parse_generic_product_links(soup, url)
         for raw in links:
             raw["_currency"] = raw.get("_currency") or "GBP"
             products.append(normalize_product(raw, vendor, url))
+
     return deduplicate(products)
 
+
+# ---------------------------------------------------------------------------
+# Generic adapter
+# ---------------------------------------------------------------------------
 
 def parse_generic(html: str, url: str) -> list[dict]:
     vendor_domain = urlparse(url).netloc.replace("www.", "")
     vendor = vendor_domain.split(".")[0].capitalize()
     soup = BeautifulSoup(html, "lxml")
     products = []
+
     structured = parse_structured_data(html)
     for raw in structured:
         products.append(normalize_product(raw, vendor, url))
+
     if not products:
         cards = parse_generic_product_cards(soup, url)
         for raw in cards:
             products.append(normalize_product(raw, vendor, url))
+
     if not products:
         links = parse_generic_product_links(soup, url)
         for raw in links:
             products.append(normalize_product(raw, vendor, url))
+
     return deduplicate(products)
 
 
@@ -616,7 +785,9 @@ VENDOR_DISPLAY_NAMES = {
 
 
 def fetch_html(url: str) -> str:
-    resp = requests.get(url, headers=BROWSER_HEADERS, timeout=FETCH_TIMEOUT, allow_redirects=True)
+    resp = requests.get(
+        url, headers=BROWSER_HEADERS, timeout=FETCH_TIMEOUT, allow_redirects=True
+    )
     resp.raise_for_status()
     return resp.text
 
@@ -671,7 +842,11 @@ def scrape_route():
         logger.exception("Parser error for %s", url)
         return jsonify({"error": f"Parse error: {e}"}), 500
     soup = BeautifulSoup(html, "lxml")
-    title = soup.title.string.strip() if soup.title and soup.title.string else url
+    title = (
+        soup.title.string.strip()
+        if soup.title and soup.title.string
+        else url
+    )
     metals = extract_metals(html)
     return jsonify({
         "source": url,
@@ -697,7 +872,11 @@ def parse_route():
         logger.exception("Parse error")
         return jsonify({"error": f"Parse error: {e}"}), 500
     soup = BeautifulSoup(html, "lxml")
-    title = soup.title.string.strip() if soup.title and soup.title.string else source_url
+    title = (
+        soup.title.string.strip()
+        if soup.title and soup.title.string
+        else source_url
+    )
     metals = extract_metals(html)
     return jsonify({
         "source": source_url,

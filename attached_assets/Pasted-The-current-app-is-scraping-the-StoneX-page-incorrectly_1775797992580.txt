@@ -1,0 +1,54 @@
+The current app is scraping the StoneX page incorrectly. The live website clearly shows a product list/table for Gold Bars with real rows such as 0.5g Gold Bar Valcambi, 1g Gold Bar PAMP Rose, 1g Gold Bar Argor-Heraeus, weights in oz, prices in EUR, and availability. However, the current scraper output is wrong because it is scraping navigation items and header/menu labels like StoneX Bullion, SILVER, LEARN, ABOUT, SHIPPING, STORAGE, etc., instead of actual product rows. The result table is therefore polluted with non-product items.
+
+Fix the app so it extracts only real product rows from category listing pages.
+
+Requirements:
+1. Keep the app as a backend-first Flask scraper.
+2. Do not fetch vendor sites directly from the browser.
+3. Focus on category/listing page row extraction, not generic menu scraping.
+4. For StoneX category pages like:
+   https://stonexbullion.com/en/gold-bars/
+   extract only visible product listing rows from the main product results area.
+5. Ignore completely:
+   - header navigation
+   - footer links
+   - side menu labels
+   - filter labels
+   - help/about/blog/learn links
+   - category titles without product data
+6. For each real product row extract:
+   - vendor
+   - category
+   - name
+   - metal
+   - weight_g
+   - price
+   - currency
+   - availability
+   - url
+   - image_url
+7. Price must be parsed from the product row price column.
+8. Weight must be parsed from the row weight column if available, otherwise inferred from name.
+9. Availability must be parsed from row text like “Availability: 493”.
+10. Use targeted DOM selection for the main product listing container. Do not globally scrape all <a> tags.
+11. Add a filtering rule that a valid product row must contain at least:
+   - a product-like URL
+   - a product name
+   - and at least one of: price, weight, availability
+12. Add a second filtering layer that rejects rows whose names are short menu-like words such as:
+   Gold, Silver, Learn, About, Supplies, Storage, Shipping, New, Sale, StoneX Bullion
+13. Build vendor-specific parser logic for StoneX listing pages using the real structure of the category results table/grid.
+14. If needed, inspect repeated DOM patterns in the listing rows and anchor the parser to the central result list container only.
+15. Keep the generic parser for other vendors, but make StoneX use a dedicated parser with stricter rules.
+16. Update the frontend display so that it shows only cleaned normalized product rows.
+17. After implementing, run a test against:
+   https://stonexbullion.com/en/gold-bars/
+   and ensure the output contains actual products, not navigation labels.
+
+Output needed:
+- updated app.py
+- updated templates/index.html if needed
+- updated parser functions
+- short explanation of what was wrong and how you fixed it
+
+Do not give me a high-level plan only. Modify the code now.
