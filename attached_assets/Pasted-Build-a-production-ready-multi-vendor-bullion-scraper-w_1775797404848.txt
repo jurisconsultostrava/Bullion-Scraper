@@ -1,0 +1,217 @@
+Build a production-ready multi-vendor bullion scraper web app in Python with Flask.
+
+Goal:
+Create a backend-first scraping app for precious metals dealer category pages and product pages. The app must support multiple vendors, not just StoneX. The browser frontend must NEVER fetch vendor websites directly. The frontend must only call my own backend API. The backend must fetch and parse vendor pages server-side.
+
+Primary use case:
+I want to input category URLs from bullion dealers and receive normalized JSON and an HTML table of products with:
+- vendor
+- category
+- product name
+- metal
+- weight_g
+- price
+- currency
+- availability
+- product URL
+- image URL
+
+Supported dealers:
+Start with a generic architecture plus vendor adapters for:
+- StoneX Bullion
+- European Mint
+- APMEX
+- BullionByPost
+- generic fallback parser for unknown bullion dealers
+
+Tech stack:
+- Python
+- Flask
+- requests
+- beautifulsoup4
+- gunicorn
+
+Optional but recommended:
+- lxml for parsing speed
+- extruct or a lightweight structured-data parser for JSON-LD / schema.org Product extraction, because many ecommerce sites expose product data in JSON-LD
+- pandas only if really necessary, otherwise avoid unnecessary complexity
+
+Do NOT:
+- do browser-only scraping
+- do frontend fetch to vendor domains
+- use mock data
+- leave TODOs unresolved
+- hardcode one dealer only
+- require me to manually maintain product catalogs
+
+Architecture requirements:
+
+1) Project structure
+Generate all files:
+- app.py
+- requirements.txt
+- Procfile
+- templates/index.html
+- README.md
+
+2) Backend routes
+Create these routes:
+
+- GET /
+  Serve the HTML frontend
+
+- GET /health
+  Return JSON:
+  {
+    "ok": true,
+    "service": "bullion-multi-scraper",
+    "version": "v1"
+  }
+
+- GET /fetch?url=https://example.com
+  Server-side fetch raw HTML using requests with browser-like headers.
+  Return text/plain.
+  Validate URL begins with http or https.
+  Add Access-Control-Allow-Origin: *
+
+- GET /scrape?url=https://example.com
+  Detect vendor from domain.
+  Use the correct vendor adapter if supported.
+  If no adapter fits, use the generic fallback parser.
+  Return JSON:
+  {
+    "source": "...",
+    "vendor": "...",
+    "title": "...",
+    "html_length": 12345,
+    "metals": {...},
+    "products": [...]
+  }
+
+- POST /parse
+  Accept raw HTML in request body plus optional query param vendor=...
+  Parse locally without remote fetching.
+
+3) Parsing architecture
+Implement clean modular parsing with:
+- detect_vendor(url)
+- infer_metal(text)
+- infer_weight(text)
+- infer_currency(text)
+- extract_metals(html)
+- parse_structured_data(html)
+- parse_generic_product_links(soup, base_url)
+- parse_generic_product_cards(soup, base_url)
+- vendor adapter functions:
+  - parse_stonex(...)
+  - parse_european_mint(...)
+  - parse_apmex(...)
+  - parse_bullionbypost(...)
+  - parse_generic(...)
+
+4) Vendor strategy
+Use this layered strategy:
+
+Layer A: structured data first
+- Parse JSON-LD schema.org Product if present
+- Extract name, offers.price, offers.priceCurrency, availability, image, url
+
+Layer B: vendor-specific selectors
+- If vendor matches a known dealer, use targeted selectors and URL rules
+
+Layer C: generic ecommerce fallback
+- Collect anchor tags and product cards
+- Prefer URLs containing patterns like:
+  /gold-bars/
+  /silver-bars/
+  /gold-coins/
+  /silver-coins/
+  /platinum-bars/
+  /palladium-bars/
+  /bullion/
+  /product/
+  /buy/
+- Reject links that are clearly:
+  blog posts
+  help articles
+  FAQ
+  guides
+  category root pages
+  search pages
+  account/cart/login pages
+
+5) Product normalization
+Every product item must be normalized to:
+{
+  "vendor": "...",
+  "category": "...",
+  "name": "...",
+  "metal": "gold|silver|platinum|palladium|",
+  "weight_g": 31.103,
+  "price": 123.45,
+  "currency": "EUR|USD|GBP|CZK|CHF|...",
+  "availability": "...",
+  "url": "https://...",
+  "image_url": "https://..."
+}
+
+Rules:
+- Deduplicate by final normalized product URL
+- Use img alt, title, visible text, URL slug, or structured data for product name
+- Convert oz to grams with 31.1034768
+- Convert kg to grams
+- If price is missing, leave null
+- If currency is missing, infer from symbol if possible, otherwise null
+- If category is not explicit, infer from URL path
+
+6) Metals extraction
+If market metal spot snippets exist in raw HTML, extract:
+gold, silver, platinum, palladium, rhodium
+with fields:
+price, diff, percent
+If absent, return empty object
+
+7) Frontend UI
+Create a minimal HTML frontend that:
+- has one input for target URL
+- has a button "Scrape via backend"
+- has a log area
+- shows summary stats:
+  vendor
+  product count
+  named product count
+  products with weight
+  prices found
+- renders a table of normalized products
+- includes an "Export JSON" button
+- calls only backend routes on the same app
+- never fetches vendor domains directly
+
+8) Quality constraints
+- Code must run immediately in Replit
+- Keep functions readable and modular
+- No giant monolithic regex-only solution
+- Best effort scraping is acceptable, but do not return obvious article sentences as products
+- Add clear filtering rules for junk content
+- Use URL-based vendor detection and adapter dispatch cleanly
+- Make generic parser reusable for new bullion dealers
+
+9) Deployment
+requirements.txt must include all required libraries.
+Procfile must be:
+web: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 60
+
+10) Final behavior
+After generating the project:
+- explain how to run it in Replit
+- explain how to deploy it in Replit
+- provide example test URLs for at least 3 vendors:
+  - StoneX Bullion
+  - European Mint
+  - APMEX
+
+Important:
+I do not want a frontend-only scraper.
+I want a backend-first multi-vendor bullion scraper with vendor adapters plus a generic fallback parser.
+Generate complete code now.
+Do not stop to ask clarifying questions unless absolutely necessary.

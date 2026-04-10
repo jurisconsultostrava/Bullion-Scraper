@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bullion Multi-Scraper</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+    }
+    header {
+      background: linear-gradient(135deg, #1a1f2e 0%, #1e2a3a 100%);
+      border-bottom: 1px solid #2d3748;
+      padding: 20px 32px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    header .logo {
+      font-size: 24px;
+      font-weight: 700;
+      color: #f6c445;
+      letter-spacing: -0.5px;
+    }
+    header .sub {
+      font-size: 13px;
+      color: #718096;
+      margin-top: 2px;
+    }
+    .container { max-width: 1300px; margin: 0 auto; padding: 28px 24px; }
+    .card {
+      background: #1a1f2e;
+      border: 1px solid #2d3748;
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 20px;
+    }
+    .card h2 { font-size: 14px; font-weight: 600; color: #a0aec0; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 16px; }
+    .input-row { display: flex; gap: 10px; align-items: center; }
+    .input-row input {
+      flex: 1;
+      background: #0f1117;
+      border: 1px solid #2d3748;
+      border-radius: 8px;
+      padding: 11px 14px;
+      color: #e2e8f0;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .input-row input:focus { border-color: #f6c445; }
+    .btn {
+      padding: 11px 22px;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      transition: all 0.2s;
+    }
+    .btn-primary { background: #f6c445; color: #1a1f2e; }
+    .btn-primary:hover { background: #f0b922; }
+    .btn-primary:disabled { background: #4a5568; color: #718096; cursor: not-allowed; }
+    .btn-secondary { background: #2d3748; color: #e2e8f0; }
+    .btn-secondary:hover { background: #3d4a5c; }
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; }
+    .stat-box {
+      background: #0f1117;
+      border: 1px solid #2d3748;
+      border-radius: 8px;
+      padding: 16px;
+      text-align: center;
+    }
+    .stat-box .val { font-size: 26px; font-weight: 700; color: #f6c445; }
+    .stat-box .lbl { font-size: 12px; color: #718096; margin-top: 4px; }
+    .log-area {
+      background: #0a0d14;
+      border: 1px solid #1e2a3a;
+      border-radius: 8px;
+      padding: 14px;
+      font-family: "Fira Code", "Courier New", monospace;
+      font-size: 12px;
+      color: #68d391;
+      height: 160px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+    }
+    .metals-row { display: flex; flex-wrap: wrap; gap: 10px; }
+    .metal-pill {
+      background: #0f1117;
+      border: 1px solid #2d3748;
+      border-radius: 8px;
+      padding: 10px 16px;
+      min-width: 140px;
+    }
+    .metal-pill .metal-name { font-size: 12px; color: #a0aec0; text-transform: capitalize; margin-bottom: 4px; }
+    .metal-pill .metal-price { font-size: 18px; font-weight: 700; color: #e2e8f0; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    thead th {
+      background: #0f1117;
+      color: #a0aec0;
+      font-weight: 600;
+      text-align: left;
+      padding: 10px 12px;
+      border-bottom: 1px solid #2d3748;
+      white-space: nowrap;
+    }
+    tbody tr:nth-child(even) { background: #141824; }
+    tbody tr:hover { background: #1e2a3a; }
+    tbody td { padding: 9px 12px; border-bottom: 1px solid #1a1f2e; vertical-align: middle; }
+    tbody td a { color: #63b3ed; text-decoration: none; }
+    tbody td a:hover { text-decoration: underline; }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: capitalize;
+    }
+    .badge-gold { background: #744210; color: #f6c445; }
+    .badge-silver { background: #2d3748; color: #e2e8f0; }
+    .badge-platinum { background: #1a365d; color: #90cdf4; }
+    .badge-palladium { background: #322659; color: #d6bcfa; }
+    .badge-empty { background: #2d3748; color: #718096; }
+    .thumb { width: 40px; height: 40px; object-fit: contain; border-radius: 4px; background: #0f1117; }
+    .avail-in { color: #68d391; font-size: 12px; }
+    .avail-out { color: #fc8181; font-size: 12px; }
+    .hidden { display: none; }
+    .export-row { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; }
+    #statusMsg { font-size: 13px; color: #a0aec0; }
+    .spinner {
+      display: inline-block;
+      width: 16px; height: 16px;
+      border: 2px solid #f6c445;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      vertical-align: middle;
+      margin-right: 6px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+<header>
+  <div>
+    <div class="logo">&#9889; Bullion Multi-Scraper</div>
+    <div class="sub">Backend-powered multi-vendor precious metals scraper</div>
+  </div>
+</header>
+
+<div class="container">
+
+  <!-- Input -->
+  <div class="card">
+    <h2>Scrape a Category or Product Page</h2>
+    <div class="input-row">
+      <input id="urlInput" type="url" placeholder="https://www.apmex.com/gold-bars" />
+      <button class="btn btn-primary" id="scrapeBtn" onclick="startScrape()">Scrape via Backend</button>
+    </div>
+    <div style="margin-top:10px; font-size:12px; color:#718096;">
+      Example URLs:
+      <a href="#" onclick="setUrl('https://www.stonexbullion.com/gold-bars/'); return false;" style="color:#63b3ed;">StoneX Gold Bars</a> &nbsp;|&nbsp;
+      <a href="#" onclick="setUrl('https://www.europeanmint.com/gold-bars/'); return false;" style="color:#63b3ed;">European Mint Gold Bars</a> &nbsp;|&nbsp;
+      <a href="#" onclick="setUrl('https://www.apmex.com/category/144/gold-bars'); return false;" style="color:#63b3ed;">APMEX Gold Bars</a> &nbsp;|&nbsp;
+      <a href="#" onclick="setUrl('https://www.bullionbypost.co.uk/gold-bars/'); return false;" style="color:#63b3ed;">BullionByPost Gold Bars</a>
+    </div>
+  </div>
+
+  <!-- Log -->
+  <div class="card">
+    <h2>Log</h2>
+    <div class="log-area" id="logArea">Ready. Enter a URL above and click Scrape.\n</div>
+  </div>
+
+  <!-- Stats -->
+  <div class="card" id="statsCard" class="hidden">
+    <h2>Summary</h2>
+    <div class="stats-grid">
+      <div class="stat-box"><div class="val" id="statVendor">—</div><div class="lbl">Vendor</div></div>
+      <div class="stat-box"><div class="val" id="statCount">0</div><div class="lbl">Total Products</div></div>
+      <div class="stat-box"><div class="val" id="statNamed">0</div><div class="lbl">Named Products</div></div>
+      <div class="stat-box"><div class="val" id="statWeight">0</div><div class="lbl">With Weight</div></div>
+      <div class="stat-box"><div class="val" id="statPrice">0</div><div class="lbl">With Price</div></div>
+    </div>
+  </div>
+
+  <!-- Metals -->
+  <div class="card hidden" id="metalsCard">
+    <h2>Spot Prices Detected</h2>
+    <div class="metals-row" id="metalsRow"></div>
+  </div>
+
+  <!-- Results -->
+  <div class="card hidden" id="resultsCard">
+    <div class="export-row">
+      <h2 style="margin:0;">Products</h2>
+      <button class="btn btn-secondary" onclick="exportJson()">Export JSON</button>
+      <span id="statusMsg"></span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th></th>
+            <th>Name</th>
+            <th>Metal</th>
+            <th>Weight (g)</th>
+            <th>Price</th>
+            <th>Currency</th>
+            <th>Availability</th>
+            <th>Vendor</th>
+            <th>Category</th>
+            <th>URL</th>
+          </tr>
+        </thead>
+        <tbody id="productsTbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  let lastData = null;
+
+  function setUrl(u) {
+    document.getElementById('urlInput').value = u;
+  }
+
+  function log(msg) {
+    const el = document.getElementById('logArea');
+    const ts = new Date().toLocaleTimeString();
+    el.textContent += `[${ts}] ${msg}\n`;
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function metalBadge(metal) {
+    if (!metal) return '<span class="badge badge-empty">—</span>';
+    const cls = {gold:'gold',silver:'silver',platinum:'platinum',palladium:'palladium'}[metal] || 'empty';
+    return `<span class="badge badge-${cls}">${metal}</span>`;
+  }
+
+  function availClass(a) {
+    if (!a) return '';
+    const lower = a.toLowerCase();
+    if (lower.includes('in') || lower.includes('stock') || lower.includes('available')) return 'avail-in';
+    if (lower.includes('out') || lower.includes('unavail') || lower.includes('sold')) return 'avail-out';
+    return '';
+  }
+
+  async function startScrape() {
+    const url = document.getElementById('urlInput').value.trim();
+    if (!url || !url.startsWith('http')) {
+      log('ERROR: Please enter a valid http/https URL.');
+      return;
+    }
+    const btn = document.getElementById('scrapeBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Scraping…';
+    log(`Requesting backend scrape for: ${url}`);
+    document.getElementById('statsCard').classList.add('hidden');
+    document.getElementById('metalsCard').classList.add('hidden');
+    document.getElementById('resultsCard').classList.add('hidden');
+
+    try {
+      const resp = await fetch(`/scrape?url=${encodeURIComponent(url)}`);
+      if (!resp.ok) {
+        const txt = await resp.text();
+        log(`ERROR ${resp.status}: ${txt}`);
+        return;
+      }
+      const data = await resp.json();
+      lastData = data;
+      log(`Vendor: ${data.vendor} | HTML: ${data.html_length.toLocaleString()} chars | Products: ${data.products.length}`);
+      renderStats(data);
+      renderMetals(data.metals);
+      renderTable(data.products);
+    } catch (err) {
+      log(`FATAL: ${err.message}`);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Scrape via Backend';
+    }
+  }
+
+  function renderStats(data) {
+    const prods = data.products || [];
+    document.getElementById('statVendor').textContent = data.vendor || '—';
+    document.getElementById('statCount').textContent = prods.length;
+    document.getElementById('statNamed').textContent = prods.filter(p => p.name && p.name.length > 3).length;
+    document.getElementById('statWeight').textContent = prods.filter(p => p.weight_g != null).length;
+    document.getElementById('statPrice').textContent = prods.filter(p => p.price != null).length;
+    document.getElementById('statsCard').classList.remove('hidden');
+  }
+
+  function renderMetals(metals) {
+    const row = document.getElementById('metalsRow');
+    row.innerHTML = '';
+    if (!metals || !Object.keys(metals).length) return;
+    for (const [name, info] of Object.entries(metals)) {
+      const pill = document.createElement('div');
+      pill.className = 'metal-pill';
+      pill.innerHTML = `<div class="metal-name">${name}</div><div class="metal-price">${info.price ? info.price.toLocaleString() : '—'}</div>`;
+      row.appendChild(pill);
+    }
+    document.getElementById('metalsCard').classList.remove('hidden');
+  }
+
+  function renderTable(products) {
+    const tbody = document.getElementById('productsTbody');
+    tbody.innerHTML = '';
+    if (!products || !products.length) {
+      tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:#718096;padding:24px;">No products found for this URL. Try a category page or a different vendor.</td></tr>';
+      document.getElementById('resultsCard').classList.remove('hidden');
+      return;
+    }
+    for (const p of products) {
+      const tr = document.createElement('tr');
+      const img = p.image_url
+        ? `<img class="thumb" src="${escHtml(p.image_url)}" alt="${escHtml(p.name)}" onerror="this.style.display='none'">`
+        : '';
+      const avCls = availClass(p.availability);
+      const shortName = p.name ? (p.name.length > 70 ? p.name.slice(0, 67) + '…' : p.name) : '—';
+      tr.innerHTML = `
+        <td>${img}</td>
+        <td title="${escHtml(p.name || '')}">${escHtml(shortName)}</td>
+        <td>${metalBadge(p.metal)}</td>
+        <td>${p.weight_g != null ? p.weight_g.toLocaleString() : '—'}</td>
+        <td>${p.price != null ? p.price.toLocaleString(undefined, {minimumFractionDigits:2,maximumFractionDigits:2}) : '—'}</td>
+        <td>${escHtml(p.currency || '—')}</td>
+        <td class="${avCls}">${escHtml(p.availability || '—')}</td>
+        <td>${escHtml(p.vendor || '—')}</td>
+        <td>${escHtml(p.category || '—')}</td>
+        <td>${p.url ? `<a href="${escHtml(p.url)}" target="_blank" rel="noopener">Link</a>` : '—'}</td>
+      `;
+      tbody.appendChild(tr);
+    }
+    document.getElementById('resultsCard').classList.remove('hidden');
+    document.getElementById('statusMsg').textContent = `${products.length} product${products.length !== 1 ? 's' : ''} found`;
+  }
+
+  function escHtml(str) {
+    if (!str) return '';
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function exportJson() {
+    if (!lastData) return;
+    const blob = new Blob([JSON.stringify(lastData, null, 2)], {type:'application/json'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `bullion-scrape-${Date.now()}.json`;
+    a.click();
+    log('Exported JSON downloaded.');
+  }
+
+  document.getElementById('urlInput').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') startScrape();
+  });
+</script>
+</body>
+</html>
