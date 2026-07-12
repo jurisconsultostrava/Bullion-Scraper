@@ -368,7 +368,7 @@
     return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
-  const EXPORT_FIELDS = ['name','metal','weight_g','price','currency','availability','product_number','vendor','category','url','image_url'];
+  const EXPORT_FIELDS = ['name','metal','weight_g','price','currency','availability','product_number','vendor','category','url','image_url','image_url_2x'];
 
   function downloadBlob(content, mime, ext) {
     const blob = new Blob([content], {type: mime});

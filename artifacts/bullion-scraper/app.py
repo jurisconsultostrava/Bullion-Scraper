@@ -564,6 +564,9 @@ def normalize_product(raw: dict, vendor: str, source_url: str) -> dict:
     image_url = raw.get("_image", "")
     if image_url and not image_url.startswith("http"):
         image_url = urljoin(source_url, image_url)
+    image_url_2x = raw.get("_image_2x", "")
+    if image_url_2x and not image_url_2x.startswith("http"):
+        image_url_2x = urljoin(source_url, image_url_2x)
     category = raw.get("_category") or infer_category(url) or infer_metal(url)
     return {
         "vendor": vendor,
@@ -577,6 +580,7 @@ def normalize_product(raw: dict, vendor: str, source_url: str) -> dict:
         "product_number": product_number,
         "url": url,
         "image_url": image_url,
+        "image_url_2x": image_url_2x,
     }
 
 
@@ -1016,6 +1020,24 @@ def _stonex_api_page(body: dict, currency: str) -> dict:
     return data["data"]["catalog"]
 
 
+_SRCSET_RE = re.compile(r'srcset="([^"]+)"')
+
+
+def _parse_srcset(picture_html: str) -> dict[str, str]:
+    """Extract {'1x': url, '2x': url} from a <picture> srcset attribute."""
+    m = _SRCSET_RE.search(picture_html or "")
+    if not m:
+        return {}
+    out = {}
+    for entry in m.group(1).split(","):
+        parts = entry.strip().split()
+        if len(parts) == 2:
+            out[parts[1]] = parts[0]
+        elif len(parts) == 1 and parts[0]:
+            out.setdefault("1x", parts[0])
+    return out
+
+
 def _stonex_api_product_to_raw(p: dict) -> dict:
     avail = p.get("availability") or {}
     code = avail.get("code", "")
@@ -1023,12 +1045,20 @@ def _stonex_api_product_to_raw(p: dict) -> dict:
         code, _TAG_RE.sub(" ", avail.get("short_text", "") or code).strip()
     )
     images = p.get("images") or {}
-    image = images.get("small", "") if isinstance(images, dict) else ""
+    image = ""
+    image_2x = ""
+    if isinstance(images, dict):
+        # "main" holds a <picture> snippet with full-size 1x/2x webp URLs;
+        # prefer those over the "small" thumbnail.
+        srcset = _parse_srcset(images.get("main", ""))
+        image = srcset.get("1x", "") or images.get("small", "")
+        image_2x = srcset.get("2x", "")
     return {
         "_name": p.get("name", ""),
         "_price": p.get("gross_price"),
         "_availability": availability,
         "_image": image,
+        "_image_2x": image_2x,
         "_url": p.get("url", ""),
         "_product_number": p.get("part_number", ""),
     }
