@@ -1067,6 +1067,9 @@ def scrape_stonex_api(url: str, currency: str) -> tuple[list[dict], int]:
 def add_cors(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    # Prevent the preview browser from serving a stale cached frontend
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
     return response
 
 
