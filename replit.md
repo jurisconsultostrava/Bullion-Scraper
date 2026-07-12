@@ -43,6 +43,14 @@ Located at `artifacts/bullion-scraper/`
 - `GET /scrape?url=...` — Full scrape + parse pipeline
 - `POST /parse?vendor=...` — Parse raw HTML body
 
+### Product Schema
+Normalized items include `product_number`: BullionByPost reads it from
+`data-price-product-id` on listing cards; StoneX has no number on listing
+pages, so `/scrape` enriches concurrently from each product detail page
+(JSON-LD `"sku"`, ThreadPoolExecutor, in-memory cache keyed by product URL).
+Enrichment is host-restricted to stonexbullion.com (SSRF guard); vendor
+detection uses exact/subdomain host matching, never substrings.
+
 ### Supported Vendors
 - StoneX Bullion (stonexbullion.com) — full support
 - BullionByPost (bullionbypost.co.uk) — full support (hub + listing pages)

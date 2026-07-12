@@ -93,16 +93,25 @@ JUNK_TEXTS = re.compile(
 # Vendor detection
 # ---------------------------------------------------------------------------
 
+VENDOR_DOMAINS = {
+    "stonex": ("stonexbullion.com",),
+    "europeanmint": ("europeanmint.com",),
+    "apmex": ("apmex.com",),
+    "bullionbypost": ("bullionbypost.co.uk",),
+}
+
+
+def _host_matches(host: str, domain: str) -> bool:
+    """Exact or subdomain match only — never substring matching, so hosts like
+    stonexbullion.com.evil.tld are NOT classified as a known vendor."""
+    return host == domain or host.endswith("." + domain)
+
+
 def detect_vendor(url: str) -> str:
-    host = urlparse(url).netloc.lower().replace("www.", "")
-    if "stonex" in host:
-        return "stonex"
-    if "europeanmint" in host or "european-mint" in host:
-        return "europeanmint"
-    if "apmex" in host:
-        return "apmex"
-    if "bullionbypost" in host:
-        return "bullionbypost"
+    host = urlparse(url).netloc.lower().split(":")[0]
+    for vendor, domains in VENDOR_DOMAINS.items():
+        if any(_host_matches(host, d) for d in domains):
+            return vendor
     return "generic"
 
 
@@ -548,6 +557,7 @@ def normalize_product(raw: dict, vendor: str, source_url: str) -> dict:
     # Use pre-parsed weight if provided by vendor adapter (avoids picking up wrong
     # numbers like "1g" from "100 x 1g" product names); fall back to name/URL inference
     weight_g = raw.get("_weight_g") or infer_weight(text_for_inference)
+    product_number = str(raw.get("_product_number") or "").strip()
     price = raw.get("_price")
     currency = raw.get("_currency") or infer_currency(text_for_inference) or None
     availability = raw.get("_availability", "")
@@ -564,6 +574,7 @@ def normalize_product(raw: dict, vendor: str, source_url: str) -> dict:
         "price": price,
         "currency": currency,
         "availability": availability,
+        "product_number": product_number,
         "url": url,
         "image_url": image_url,
     }
@@ -719,6 +730,9 @@ def parse_bullionbypost(html: str, url: str) -> list[dict]:
             price = infer_price(price_el.get_text()) if price_el else None
             stock_el = card.select_one(".stock-message")
             availability = stock_el.get_text(strip=True) if stock_el else ""
+            # BBP exposes its product id on the price element
+            pid_el = card.select_one("[data-price-product-id]")
+            product_number = pid_el.get("data-price-product-id", "") if pid_el else ""
             img = card.select_one(".product-image img") or card.find("img")
             image_url = ""
             if img:
@@ -732,6 +746,7 @@ def parse_bullionbypost(html: str, url: str) -> list[dict]:
                 "_availability": availability,
                 "_image": image_url,
                 "_url": href,
+                "_product_number": product_number,
             }
             products.append(normalize_product(raw, vendor, url))
 
@@ -869,6 +884,79 @@ def find_pagination_urls(html: str, url: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Product-number enrichment (StoneX)
+#
+# StoneX listing cards do not expose the product number; it only appears on
+# each product detail page (JSON-LD "sku" + a "Product number" table row).
+# We fetch detail pages concurrently and cache results in memory, since
+# product numbers never change for a given URL.
+# ---------------------------------------------------------------------------
+
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+_product_number_cache: dict[str, str] = {}
+_product_number_cache_lock = threading.Lock()
+_SKU_RE = re.compile(r'"sku"\s*:\s*"([^"]+)"')
+_PN_ROW_RE = re.compile(
+    r"Product number</td>\s*<td[^>]*>([^<]+)</td>", re.IGNORECASE
+)
+ENRICH_MAX_WORKERS = 6
+ENRICH_TIMEOUT = 15
+
+
+def _is_stonex_url(product_url: str) -> bool:
+    try:
+        host = urlparse(product_url).netloc.lower().split(":")[0]
+    except Exception:
+        return False
+    return any(_host_matches(host, d) for d in VENDOR_DOMAINS["stonex"])
+
+
+def _fetch_stonex_product_number(product_url: str) -> str:
+    with _product_number_cache_lock:
+        if product_url in _product_number_cache:
+            return _product_number_cache[product_url]
+    try:
+        resp = cffi_requests.get(
+            product_url, impersonate="firefox135", timeout=ENRICH_TIMEOUT
+        )
+        if resp.status_code != 200:
+            return ""
+        m = _SKU_RE.search(resp.text) or _PN_ROW_RE.search(resp.text)
+        number = m.group(1).strip() if m else ""
+        if number:
+            with _product_number_cache_lock:
+                _product_number_cache[product_url] = number
+        return number
+    except Exception:
+        logger.warning("Product-number fetch failed for %s", product_url)
+        return ""
+
+
+def enrich_stonex_product_numbers(products: list[dict]) -> None:
+    # SSRF guard: only ever fetch URLs on the real StoneX domain. Product URLs
+    # come from scraped HTML, which must be treated as untrusted input.
+    targets = [
+        p for p in products
+        if not p.get("product_number") and _is_stonex_url(p.get("url", ""))
+    ]
+    if not targets:
+        return
+    with ThreadPoolExecutor(max_workers=ENRICH_MAX_WORKERS) as pool:
+        futures = {
+            pool.submit(_fetch_stonex_product_number, p["url"]): p for p in targets
+        }
+        for fut in as_completed(futures):
+            futures[fut]["product_number"] = fut.result()
+
+
+ENRICHERS = {
+    "stonex": enrich_stonex_product_numbers,
+}
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
@@ -935,6 +1023,13 @@ def scrape_route():
                 break
             pages_fetched += 1
     products = deduplicate(products)
+
+    enricher = ENRICHERS.get(vendor_key)
+    if enricher:
+        try:
+            enricher(products)
+        except Exception:
+            logger.exception("Enrichment failed for %s", url)
 
     soup = BeautifulSoup(html, "lxml")
     title = (

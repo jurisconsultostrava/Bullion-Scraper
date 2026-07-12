@@ -215,6 +215,7 @@
             <th>Price</th>
             <th>Currency</th>
             <th>Availability</th>
+            <th>Product #</th>
             <th>Vendor</th>
             <th>Category</th>
             <th>URL</th>
@@ -317,7 +318,7 @@
     const tbody = document.getElementById('productsTbody');
     tbody.innerHTML = '';
     if (!products || !products.length) {
-      tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:#718096;padding:24px;">No products found for this URL. Try a category page or a different vendor.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;color:#718096;padding:24px;">No products found for this URL. Try a category page or a different vendor.</td></tr>';
       document.getElementById('resultsCard').classList.remove('hidden');
       return;
     }
@@ -336,6 +337,7 @@
         <td>${p.price != null ? p.price.toLocaleString(undefined, {minimumFractionDigits:2,maximumFractionDigits:2}) : '—'}</td>
         <td>${escHtml(p.currency || '—')}</td>
         <td class="${avCls}">${escHtml(p.availability || '—')}</td>
+        <td>${escHtml(p.product_number || '—')}</td>
         <td>${escHtml(p.vendor || '—')}</td>
         <td>${escHtml(p.category || '—')}</td>
         <td>${p.url ? `<a href="${escHtml(p.url)}" target="_blank" rel="noopener">Link</a>` : '—'}</td>
