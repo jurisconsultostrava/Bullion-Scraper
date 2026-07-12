@@ -368,7 +368,7 @@
     return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
-  const EXPORT_FIELDS = ['name','metal','weight_g','price','currency','availability','product_number','vendor','category','url','image_url','image_url_2x'];
+  const EXPORT_FIELDS = ['name','metal','weight_g','price','currency','availability','product_number','vendor','category','url','image_url','image_url_2x','images'];
 
   function downloadBlob(content, mime, ext) {
     const blob = new Blob([content], {type: mime});
@@ -389,7 +389,7 @@
     if (!lastData || !lastData.products) return;
     const escCsv = v => {
       if (v == null) return '';
-      const s = String(v);
+      const s = Array.isArray(v) ? v.join('|') : String(v);
       return /[",\n;]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
     };
     const rows = [EXPORT_FIELDS.join(',')];
@@ -412,7 +412,16 @@
     for (const p of lastData.products) {
       lines.push('    <product>');
       for (const f of EXPORT_FIELDS) {
-        lines.push(`      <${f}>${escXml(p[f])}</${f}>`);
+        const v = p[f];
+        if (Array.isArray(v)) {
+          lines.push(`      <${f}>`);
+          for (const item of v) {
+            lines.push(`        <image>${escXml(item)}</image>`);
+          }
+          lines.push(`      </${f}>`);
+        } else {
+          lines.push(`      <${f}>${escXml(v)}</${f}>`);
+        }
       }
       lines.push('    </product>');
     }

@@ -581,6 +581,7 @@ def normalize_product(raw: dict, vendor: str, source_url: str) -> dict:
         "url": url,
         "image_url": image_url,
         "image_url_2x": image_url_2x,
+        "images": [image_url] if image_url else [],
     }
 
 
@@ -958,8 +959,69 @@ def enrich_stonex_product_numbers(products: list[dict]) -> None:
             futures[fut]["product_number"] = fut.result()
 
 
+_gallery_cache: dict[str, list] = {}
+_gallery_cache_lock = threading.Lock()
+
+
+def _fetch_stonex_gallery(product_url: str) -> list[str]:
+    """Fetch the full image gallery for a StoneX product via the router API
+    (POST /api/client/router/ with the product path). Product detail pages
+    cannot be rendered server-side (StoneX SSR returns 502), but this JSON
+    API returns product.images.list — one <picture> snippet per gallery
+    photo — from which we extract the 1x URLs."""
+    path = urlparse(product_url).path
+    with _gallery_cache_lock:
+        if path in _gallery_cache:
+            return _gallery_cache[path]
+    try:
+        resp = cffi_requests.post(
+            STONEX_ROUTER_API_URL,
+            impersonate="firefox135",
+            timeout=ENRICH_TIMEOUT,
+            json={"path": path},
+        )
+        if resp.status_code != 200:
+            return []
+        data = resp.json().get("data") or {}
+        images = (data.get("product") or {}).get("images") or {}
+        urls: list[str] = []
+        for snippet in images.get("list") or []:
+            u = _parse_srcset(snippet).get("1x", "")
+            if u and u not in urls:
+                urls.append(u)
+        if urls:
+            with _gallery_cache_lock:
+                _gallery_cache[path] = urls
+        return urls
+    except Exception:
+        logger.warning("Gallery fetch failed for %s", product_url)
+        return []
+
+
+def enrich_stonex_galleries(products: list[dict]) -> None:
+    # SSRF guard: only ever call the router API for URLs on the real StoneX
+    # domain (the path is taken from the product URL, which is scraped data).
+    targets = [p for p in products if _is_stonex_url(p.get("url", ""))]
+    if not targets:
+        return
+    with ThreadPoolExecutor(max_workers=ENRICH_MAX_WORKERS) as pool:
+        futures = {
+            pool.submit(_fetch_stonex_gallery, p["url"]): p for p in targets
+        }
+        for fut in as_completed(futures):
+            p = futures[fut]
+            gallery = fut.result()
+            if gallery:
+                p["images"] = gallery
+
+
+def enrich_stonex(products: list[dict]) -> None:
+    enrich_stonex_product_numbers(products)
+    enrich_stonex_galleries(products)
+
+
 ENRICHERS = {
-    "stonex": enrich_stonex_product_numbers,
+    "stonex": enrich_stonex,
 }
 
 
@@ -975,6 +1037,7 @@ ENRICHERS = {
 # ---------------------------------------------------------------------------
 
 STONEX_API_URL = "https://stonexbullion.com/api/client/catalog/"
+STONEX_ROUTER_API_URL = "https://stonexbullion.com/api/client/router/"
 STONEX_CURRENCIES = {"EUR", "USD", "GBP", "PLN", "CHF", "SGD", "AUD", "CZK", "CAD"}
 STONEX_API_MAX_PAGES = 10
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -1148,6 +1211,10 @@ def scrape_route():
             logger.warning("StoneX API scrape failed for %s: %s", url, e)
             products, pages_fetched = [], 0
         if products:
+            try:
+                enrich_stonex_galleries(products)
+            except Exception:
+                logger.exception("Gallery enrichment failed for %s", url)
             return jsonify({
                 "source": url,
                 "vendor": VENDOR_DISPLAY_NAMES.get("stonex", "stonex"),
