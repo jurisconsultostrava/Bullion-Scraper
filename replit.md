@@ -44,11 +44,18 @@ Located at `artifacts/bullion-scraper/`
 - `POST /parse?vendor=...` — Parse raw HTML body
 
 ### Supported Vendors
-- StoneX Bullion (stonexbullion.com)
-- European Mint (europeanmint.com)
-- APMEX (apmex.com)
-- BullionByPost (bullionbypost.co.uk)
+- StoneX Bullion (stonexbullion.com) — full support
+- BullionByPost (bullionbypost.co.uk) — full support (hub + listing pages)
+- APMEX (apmex.com) — partial: product grid is client-side JS; only the few server-rendered `/product/` links are returned, usually without prices
+- European Mint (europeanmint.com) — blocked: Cloudflare JS challenge cannot be passed server-side; returns 502 with a clear error message
 - Generic fallback (any bullion dealer)
+
+### Fetching
+`fetch_html()` uses `curl_cffi` with TLS browser impersonation (profiles tried in
+order: firefox135, safari18_0, chrome131). Cloudflare fingerprints the TLS
+handshake, so plain `requests` gets 403 on several vendors; firefox/safari
+profiles currently pass where chrome is challenged. Fetch failures raise
+`FetchError` (with upstream status) and surface as 502 JSON errors.
 
 ### Running Locally
 ```

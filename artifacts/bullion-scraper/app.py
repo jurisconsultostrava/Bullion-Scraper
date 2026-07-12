@@ -5,6 +5,7 @@ import logging
 from urllib.parse import urlparse, urljoin
 from flask import Flask, request, jsonify, render_template, Response
 import requests
+from curl_cffi import requests as cffi_requests
 from bs4 import BeautifulSoup, Tag
 
 logging.basicConfig(level=logging.INFO)
@@ -349,25 +350,34 @@ def parse_stonex(html: str, url: str) -> list[dict]:
         desc_text = desc_el.get_text(strip=True)
         weight_g = infer_weight(desc_text)
         availability = ""
-        m = re.search(r"Availability[:\s]*(\d+)", desc_text, re.IGNORECASE)
-        if m:
-            availability = f"In Stock ({m.group(1)})"
+        m = re.search(r"Availability[:\s]*([\d,]+)", desc_text, re.IGNORECASE)
+        cart_el = body.find(class_="cart-action-container")
+        cart_text = cart_el.get_text(strip=True).lower() if cart_el else ""
+        if "notify" in cart_text:
+            # "Notify me" button = currently unavailable
+            availability = "Out of Stock"
+        elif m:
+            availability = f"In Stock ({m.group(1).replace(',', '')})"
         else:
             # If no explicit availability count but product is listed it's likely in stock
             availability = "In Stock"
 
-        # Price from the body child div with ONLY class "py-3"
+        # Price: prefer div.product-thumb-price; fall back to the body child
+        # whose only class is "py-3" (older markup variant)
         price = None
         currency = "EUR"
-        for child in body.children:
-            if not isinstance(child, Tag):
-                continue
-            child_classes = child.get("class") or []
-            if child_classes == ["py-3"]:
-                price_text = child.get_text(strip=True)
-                price = infer_price(price_text)
-                currency = infer_currency(price_text) or "EUR"
-                break
+        price_el = body.find(class_="product-thumb-price")
+        if price_el is None:
+            for child in body.children:
+                if not isinstance(child, Tag):
+                    continue
+                if (child.get("class") or []) == ["py-3"]:
+                    price_el = child
+                    break
+        if price_el is not None:
+            price_text = price_el.get_text(strip=True)
+            price = infer_price(price_text)
+            currency = infer_currency(price_text) or "EUR"
 
         # Image
         img = a.find("img")
@@ -637,19 +647,26 @@ def parse_apmex(html: str, url: str) -> list[dict]:
         products.append(normalize_product(raw, vendor, url))
 
     if not products:
-        for item in soup.select(
-            "[class*='productItem'], [class*='product-item'], "
-            "[data-product-id], .item-description"
-        ):
-            name_el = item.find(["h2", "h3", "h4", "span", "a"])
-            name = name_el.get_text(strip=True) if name_el else item.get_text(strip=True)
-            if is_junk_name(name):
+        # APMEX renders its product grid client-side (JavaScript), so category
+        # pages only server-render a handful of promoted /product/ links.
+        # Parse those explicitly; never fall back to generic link scraping,
+        # which would only pick up navigation/category labels.
+        seen_hrefs = set()
+        for a_el in soup.select("a[href^='/product/']"):
+            href = a_el.get("href", "")
+            if href in seen_hrefs:
                 continue
-            a_el = item.find("a", href=True) or item.find_parent("a")
-            href = urljoin(url, a_el["href"]) if a_el else url
-            price_el = item.find(class_=re.compile(r"price", re.IGNORECASE))
+            seen_hrefs.add(href)
+            name = a_el.get_text(strip=True)
+            if not name or is_junk_name(name):
+                img_in = a_el.find("img")
+                name = (img_in.get("alt", "").strip() if img_in else "") or ""
+            if not name or is_junk_name(name):
+                continue
+            container = a_el.find_parent(["div", "li", "article"]) or a_el
+            price_el = container.find(class_=re.compile(r"price", re.IGNORECASE))
             price = infer_price(price_el.get_text()) if price_el else None
-            img = item.find("img")
+            img = container.find("img") or a_el.find("img")
             image_url = ""
             if img:
                 image_url = img.get("src", "") or img.get("data-src", "")
@@ -661,20 +678,8 @@ def parse_apmex(html: str, url: str) -> list[dict]:
                 "_currency": "USD",
                 "_availability": "",
                 "_image": image_url,
-                "_url": href,
+                "_url": urljoin(url, href),
             }
-            products.append(normalize_product(raw, vendor, url))
-
-    if not products:
-        cards = parse_generic_product_cards(soup, url)
-        for raw in cards:
-            raw["_currency"] = raw.get("_currency") or "USD"
-            products.append(normalize_product(raw, vendor, url))
-
-    if not products:
-        links = parse_generic_product_links(soup, url)
-        for raw in links:
-            raw["_currency"] = raw.get("_currency") or "USD"
             products.append(normalize_product(raw, vendor, url))
 
     return deduplicate(products)
@@ -685,6 +690,14 @@ def parse_apmex(html: str, url: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def parse_bullionbypost(html: str, url: str) -> list[dict]:
+    """BullionByPost renders cards as div.card.category-module (category hub
+    pages) or div.card.product-module (product listing pages). Both share:
+      - p.product-name > a          -> name + product/category URL
+      - span.price                  -> price (first one; page duplicates it
+                                       for mobile/desktop layouts)
+      - .stock-message              -> availability badge
+      - .product-image img          -> image
+    """
     vendor = "BullionByPost"
     soup = BeautifulSoup(html, "lxml")
     products = []
@@ -694,18 +707,19 @@ def parse_bullionbypost(html: str, url: str) -> list[dict]:
         products.append(normalize_product(raw, vendor, url))
 
     if not products:
-        for item in soup.select(
-            ".product-cell, .listing-item, .product-listing li, [class*='productCell']"
-        ):
-            name_el = item.find(["h2", "h3", "h4", "a"])
-            name = name_el.get_text(strip=True) if name_el else ""
-            if is_junk_name(name):
+        for card in soup.select("div.card.category-module, div.card.product-module"):
+            name_el = card.select_one("p.product-name a")
+            if not name_el:
                 continue
-            a_el = item.find("a", href=True)
-            href = urljoin(url, a_el["href"]) if a_el else url
-            price_el = item.find(class_=re.compile(r"price|cost", re.IGNORECASE))
+            name = name_el.get_text(strip=True)
+            if not name or is_junk_name(name):
+                continue
+            href = urljoin(url, name_el.get("href", ""))
+            price_el = card.select_one("span.price")
             price = infer_price(price_el.get_text()) if price_el else None
-            img = item.find("img")
+            stock_el = card.select_one(".stock-message")
+            availability = stock_el.get_text(strip=True) if stock_el else ""
+            img = card.select_one(".product-image img") or card.find("img")
             image_url = ""
             if img:
                 image_url = img.get("src", "") or img.get("data-src", "")
@@ -715,7 +729,7 @@ def parse_bullionbypost(html: str, url: str) -> list[dict]:
                 "_name": name,
                 "_price": price,
                 "_currency": "GBP",
-                "_availability": "",
+                "_availability": availability,
                 "_image": image_url,
                 "_url": href,
             }
@@ -784,12 +798,74 @@ VENDOR_DISPLAY_NAMES = {
 }
 
 
+class FetchError(Exception):
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
+
+# TLS impersonation profiles tried in order. Many bullion sites sit behind
+# Cloudflare, which fingerprints the TLS handshake; firefox/safari profiles
+# currently pass where chrome profiles are challenged.
+IMPERSONATE_PROFILES = ["firefox135", "safari18_0", "chrome131"]
+
+CF_CHALLENGE_MARKERS = ("just a moment", "challenges.cloudflare.com")
+
+
 def fetch_html(url: str) -> str:
-    resp = requests.get(
-        url, headers=BROWSER_HEADERS, timeout=FETCH_TIMEOUT, allow_redirects=True
-    )
-    resp.raise_for_status()
-    return resp.text
+    last_error: str = "unknown error"
+    last_status: int | None = None
+    for profile in IMPERSONATE_PROFILES:
+        try:
+            resp = cffi_requests.get(
+                url,
+                impersonate=profile,
+                timeout=FETCH_TIMEOUT,
+                allow_redirects=True,
+            )
+        except Exception as e:
+            last_error = f"{type(e).__name__}: {e}"
+            continue
+        body_head = resp.text[:2000].lower()
+        is_challenge = any(m in body_head for m in CF_CHALLENGE_MARKERS)
+        if resp.status_code == 200 and not is_challenge:
+            return resp.text
+        last_status = resp.status_code
+        if is_challenge:
+            last_error = (
+                f"blocked by Cloudflare bot challenge (HTTP {resp.status_code}, "
+                f"profile {profile}). This site requires JavaScript execution "
+                "and cannot be fetched server-side."
+            )
+        else:
+            last_error = f"upstream returned HTTP {resp.status_code} (profile {profile})"
+    raise FetchError(last_error, status=last_status)
+
+
+MAX_PAGES = 5
+
+
+def find_pagination_urls(html: str, url: str) -> list[str]:
+    """Detect ?page=N pagination links pointing at the same path and return
+    URLs for pages 2..N (capped at MAX_PAGES)."""
+    soup = BeautifulSoup(html, "lxml")
+    base = urlparse(url)
+    page_numbers = set()
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        m = re.search(r"[?&]page=(\d+)", href)
+        if not m:
+            continue
+        full = urljoin(url, href)
+        pu = urlparse(full)
+        if pu.netloc == base.netloc and pu.path == base.path:
+            page_numbers.add(int(m.group(1)))
+    if not page_numbers:
+        return []
+    last_page = min(max(page_numbers), MAX_PAGES)
+    clean = url.split("#")[0]
+    sep = "&" if "?" in clean else "?"
+    return [f"{clean}{sep}page={n}" for n in range(2, last_page + 1)]
 
 
 # ---------------------------------------------------------------------------
@@ -821,7 +897,7 @@ def fetch_route():
     try:
         html = fetch_html(url)
         return Response(html, status=200, mimetype="text/plain")
-    except requests.exceptions.RequestException as e:
+    except FetchError as e:
         return Response(f"Fetch error: {e}", status=502, mimetype="text/plain")
 
 
@@ -832,8 +908,8 @@ def scrape_route():
         return jsonify({"error": "Invalid or missing URL"}), 400
     try:
         html = fetch_html(url)
-    except requests.exceptions.RequestException as e:
-        return jsonify({"error": f"Fetch failed: {e}"}), 502
+    except FetchError as e:
+        return jsonify({"error": f"Fetch failed: {e}", "upstream_status": e.status}), 502
     vendor_key = detect_vendor(url)
     adapter = VENDOR_ADAPTERS.get(vendor_key, parse_generic)
     try:
@@ -841,6 +917,25 @@ def scrape_route():
     except Exception as e:
         logger.exception("Parser error for %s", url)
         return jsonify({"error": f"Parse error: {e}"}), 500
+
+    # Follow pagination (?page=N links on the same path), unless the caller
+    # already requested a specific page.
+    pages_fetched = 1
+    if "page=" not in url:
+        for page_url in find_pagination_urls(html, url):
+            try:
+                page_html = fetch_html(page_url)
+            except FetchError as e:
+                logger.warning("Pagination fetch failed for %s: %s", page_url, e)
+                break
+            try:
+                products.extend(adapter(page_html, page_url))
+            except Exception:
+                logger.exception("Parser error for paginated %s", page_url)
+                break
+            pages_fetched += 1
+    products = deduplicate(products)
+
     soup = BeautifulSoup(html, "lxml")
     title = (
         soup.title.string.strip()
@@ -854,6 +949,7 @@ def scrape_route():
         "title": title,
         "html_length": len(html),
         "metals": metals,
+        "pages_fetched": pages_fetched,
         "products": products,
     })
 
