@@ -214,6 +214,8 @@
     <div class="export-row">
       <h2 style="margin:0;">Products</h2>
       <button class="btn btn-secondary" onclick="exportJson()">Export JSON</button>
+      <button class="btn btn-secondary" onclick="exportCsv()">Export CSV</button>
+      <button class="btn btn-secondary" onclick="exportXml()">Export XML</button>
       <span id="statusMsg"></span>
     </div>
     <div class="table-wrap">
@@ -366,14 +368,58 @@
     return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
-  function exportJson() {
-    if (!lastData) return;
-    const blob = new Blob([JSON.stringify(lastData, null, 2)], {type:'application/json'});
+  const EXPORT_FIELDS = ['name','metal','weight_g','price','currency','availability','product_number','vendor','category','url','image_url'];
+
+  function downloadBlob(content, mime, ext) {
+    const blob = new Blob([content], {type: mime});
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `bullion-scrape-${Date.now()}.json`;
+    a.download = `bullion-scrape-${Date.now()}.${ext}`;
     a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  function exportJson() {
+    if (!lastData) return;
+    downloadBlob(JSON.stringify(lastData, null, 2), 'application/json', 'json');
     log('Exported JSON downloaded.');
+  }
+
+  function exportCsv() {
+    if (!lastData || !lastData.products) return;
+    const escCsv = v => {
+      if (v == null) return '';
+      const s = String(v);
+      return /[",\n;]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+    const rows = [EXPORT_FIELDS.join(',')];
+    for (const p of lastData.products) {
+      rows.push(EXPORT_FIELDS.map(f => escCsv(p[f])).join(','));
+    }
+    // BOM so Excel opens UTF-8 (Kč, diacritics) correctly
+    downloadBlob('\uFEFF' + rows.join('\r\n'), 'text/csv;charset=utf-8', 'csv');
+    log(`Exported CSV downloaded (${lastData.products.length} rows).`);
+  }
+
+  function exportXml() {
+    if (!lastData || !lastData.products) return;
+    const escXml = v => String(v == null ? '' : v)
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;').replace(/'/g,'&apos;');
+    const lines = ['<?xml version="1.0" encoding="UTF-8"?>'];
+    lines.push(`<scrape source="${escXml(lastData.source || '')}" vendor="${escXml(lastData.vendor || '')}" exported="${new Date().toISOString()}">`);
+    lines.push('  <products>');
+    for (const p of lastData.products) {
+      lines.push('    <product>');
+      for (const f of EXPORT_FIELDS) {
+        lines.push(`      <${f}>${escXml(p[f])}</${f}>`);
+      }
+      lines.push('    </product>');
+    }
+    lines.push('  </products>');
+    lines.push('</scrape>');
+    downloadBlob(lines.join('\n'), 'application/xml;charset=utf-8', 'xml');
+    log(`Exported XML downloaded (${lastData.products.length} products).`);
   }
 
   document.getElementById('urlInput').addEventListener('keydown', function(e) {
