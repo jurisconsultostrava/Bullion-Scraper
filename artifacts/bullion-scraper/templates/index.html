@@ -162,6 +162,18 @@
     <h2>Scrape a Category or Product Page</h2>
     <div class="input-row">
       <input id="urlInput" type="url" placeholder="https://www.apmex.com/gold-bars" />
+      <select id="currencySelect" title="Currency (StoneX only — other vendors show their own prices)"
+              style="background:#1a202c;color:#e2e8f0;border:1px solid #2d3748;border-radius:6px;padding:0 10px;font-size:14px;">
+        <option value="EUR" selected>EUR</option>
+        <option value="CZK">CZK</option>
+        <option value="USD">USD</option>
+        <option value="GBP">GBP</option>
+        <option value="PLN">PLN</option>
+        <option value="CHF">CHF</option>
+        <option value="AUD">AUD</option>
+        <option value="CAD">CAD</option>
+        <option value="SGD">SGD</option>
+      </select>
       <button class="btn btn-primary" id="scrapeBtn" onclick="startScrape()">Scrape via Backend</button>
     </div>
     <div style="margin-top:10px; font-size:12px; color:#718096;">
@@ -271,7 +283,8 @@
     document.getElementById('resultsCard').classList.add('hidden');
 
     try {
-      const resp = await fetch(`/scrape?url=${encodeURIComponent(url)}`);
+      const currency = document.getElementById('currencySelect').value;
+      const resp = await fetch(`/scrape?url=${encodeURIComponent(url)}&currency=${encodeURIComponent(currency)}`);
       if (!resp.ok) {
         const txt = await resp.text();
         log(`ERROR ${resp.status}: ${txt}`);

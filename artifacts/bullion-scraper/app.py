@@ -2,7 +2,7 @@ import os
 import re
 import json
 import logging
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, parse_qsl
 from flask import Flask, request, jsonify, render_template, Response
 import requests
 from curl_cffi import requests as cffi_requests
@@ -960,6 +960,106 @@ ENRICHERS = {
 
 
 # ---------------------------------------------------------------------------
+# StoneX catalog JSON API
+#
+# StoneX is a Nuxt SPA; its /en/search/ pages cannot be rendered server-side
+# (their own SSR returns HTTP 502 for them). The frontend loads listings via
+# POST /api/client/catalog/ with the page path + filters in the JSON body and
+# the display currency in an X-Currency header. This API also serves regular
+# category pages (body {"url": "/en/gold-bars/"}) and returns part_number
+# directly, so no per-product detail-page enrichment is needed.
+# ---------------------------------------------------------------------------
+
+STONEX_API_URL = "https://stonexbullion.com/api/client/catalog/"
+STONEX_CURRENCIES = {"EUR", "USD", "GBP", "PLN", "CHF", "SGD", "AUD", "CZK", "CAD"}
+STONEX_API_MAX_PAGES = 10
+_TAG_RE = re.compile(r"<[^>]+>")
+
+STONEX_AVAILABILITY_LABELS = {
+    "in_stock": "In Stock",
+    "out_of_stock": "Out of Stock",
+    "pre_sale": "Pre-Sale",
+}
+
+
+def _parse_bracket_params(query: str) -> dict:
+    """Convert 'type_ids[0]=2&type_ids[1]=3&term=x' into
+    {'type_ids': [2, 3], 'term': 'x'} for the StoneX API body."""
+    params: dict = {}
+    for key, value in parse_qsl(query, keep_blank_values=False):
+        base = key.split("[", 1)[0]
+        if value.isdigit():
+            value = int(value)
+        if "[" in key:
+            params.setdefault(base, []).append(value)
+        else:
+            params[base] = value
+    params.pop("page", None)
+    return params
+
+
+def _stonex_api_page(body: dict, currency: str) -> dict:
+    resp = cffi_requests.post(
+        STONEX_API_URL,
+        impersonate="firefox135",
+        timeout=FETCH_TIMEOUT,
+        json=body,
+        headers={"Accept": "application/json", "X-Currency": currency},
+    )
+    if resp.status_code != 200:
+        raise FetchError(
+            f"StoneX API returned HTTP {resp.status_code}", status=resp.status_code
+        )
+    data = json.loads(resp.text)
+    if not data.get("success"):
+        raise FetchError(f"StoneX API error: {data.get('message') or data.get('code')}")
+    return data["data"]["catalog"]
+
+
+def _stonex_api_product_to_raw(p: dict) -> dict:
+    avail = p.get("availability") or {}
+    code = avail.get("code", "")
+    availability = STONEX_AVAILABILITY_LABELS.get(
+        code, _TAG_RE.sub(" ", avail.get("short_text", "") or code).strip()
+    )
+    images = p.get("images") or {}
+    image = images.get("small", "") if isinstance(images, dict) else ""
+    return {
+        "_name": p.get("name", ""),
+        "_price": p.get("gross_price"),
+        "_availability": availability,
+        "_image": image,
+        "_url": p.get("url", ""),
+        "_product_number": p.get("part_number", ""),
+    }
+
+
+def scrape_stonex_api(url: str, currency: str) -> tuple[list[dict], int]:
+    """Scrape a StoneX listing/search URL via the catalog JSON API.
+    Returns (products, pages_fetched). Raises FetchError on API failure."""
+    parsed = urlparse(url)
+    body = _parse_bracket_params(parsed.query)
+    body["url"] = parsed.path
+    body["page"] = 1
+    catalog = _stonex_api_page(body, currency)
+    paginator = catalog.get("paginator") or {}
+    last_page = min(int(paginator.get("last_page") or 1), STONEX_API_MAX_PAGES)
+    raw_products = list(catalog.get("products") or [])
+    pages_fetched = 1
+    for page in range(2, last_page + 1):
+        body["page"] = page
+        page_catalog = _stonex_api_page(body, currency)
+        raw_products.extend(page_catalog.get("products") or [])
+        pages_fetched += 1
+    products = []
+    for p in raw_products:
+        raw = _stonex_api_product_to_raw(p)
+        raw["_currency"] = currency
+        products.append(normalize_product(raw, "stonex", url))
+    return deduplicate(products), pages_fetched
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
@@ -997,6 +1097,35 @@ def scrape_route():
     url = request.args.get("url", "").strip()
     if not url or not url.startswith(("http://", "https://")):
         return jsonify({"error": "Invalid or missing URL"}), 400
+    currency = request.args.get("currency", "EUR").strip().upper() or "EUR"
+    if currency not in STONEX_CURRENCIES:
+        return jsonify({
+            "error": f"Unsupported currency '{currency}'. "
+                     f"Supported: {', '.join(sorted(STONEX_CURRENCIES))}"
+        }), 400
+
+    # StoneX: use the catalog JSON API (handles /search/ URLs that their SSR
+    # can't render, supports currency selection, returns product numbers
+    # directly, and paginates reliably). Falls back to HTML scraping if the
+    # API yields nothing (e.g. product detail pages).
+    if detect_vendor(url) == "stonex":
+        try:
+            products, pages_fetched = scrape_stonex_api(url, currency)
+        except Exception as e:
+            logger.warning("StoneX API scrape failed for %s: %s", url, e)
+            products, pages_fetched = [], 0
+        if products:
+            return jsonify({
+                "source": url,
+                "vendor": VENDOR_DISPLAY_NAMES.get("stonex", "stonex"),
+                "title": "StoneX Bullion (catalog API)",
+                "html_length": 0,
+                "metals": sorted({p["metal"] for p in products if p.get("metal")}),
+                "currency": currency,
+                "pages_fetched": pages_fetched,
+                "products": products,
+            })
+
     try:
         html, final_url = fetch_html(url)
     except FetchError as e:
