@@ -827,7 +827,10 @@ IMPERSONATE_PROFILES = ["firefox135", "safari18_0", "chrome131"]
 CF_CHALLENGE_MARKERS = ("just a moment", "challenges.cloudflare.com")
 
 
-def fetch_html(url: str) -> str:
+def fetch_html(url: str) -> tuple[str, str]:
+    """Fetch a URL and return (html, final_url). final_url reflects redirects
+    (e.g. www.stonexbullion.com/gold-bars/ -> stonexbullion.com/en/gold-bars/),
+    which matters for pagination link matching and relative URL resolution."""
     last_error: str = "unknown error"
     last_status: int | None = None
     for profile in IMPERSONATE_PROFILES:
@@ -844,7 +847,7 @@ def fetch_html(url: str) -> str:
         body_head = resp.text[:2000].lower()
         is_challenge = any(m in body_head for m in CF_CHALLENGE_MARKERS)
         if resp.status_code == 200 and not is_challenge:
-            return resp.text
+            return resp.text, str(resp.url) or url
         last_status = resp.status_code
         if is_challenge:
             last_error = (
@@ -983,7 +986,7 @@ def fetch_route():
     if not url or not url.startswith(("http://", "https://")):
         return Response("Invalid or missing URL", status=400, mimetype="text/plain")
     try:
-        html = fetch_html(url)
+        html, _ = fetch_html(url)
         return Response(html, status=200, mimetype="text/plain")
     except FetchError as e:
         return Response(f"Fetch error: {e}", status=502, mimetype="text/plain")
@@ -995,9 +998,12 @@ def scrape_route():
     if not url or not url.startswith(("http://", "https://")):
         return jsonify({"error": "Invalid or missing URL"}), 400
     try:
-        html = fetch_html(url)
+        html, final_url = fetch_html(url)
     except FetchError as e:
         return jsonify({"error": f"Fetch failed: {e}", "upstream_status": e.status}), 502
+    # Use the post-redirect URL for vendor detection, relative-URL resolution
+    # and pagination matching (e.g. www.../gold-bars/ redirects to /en/gold-bars/).
+    url = final_url
     vendor_key = detect_vendor(url)
     adapter = VENDOR_ADAPTERS.get(vendor_key, parse_generic)
     try:
@@ -1012,7 +1018,7 @@ def scrape_route():
     if "page=" not in url:
         for page_url in find_pagination_urls(html, url):
             try:
-                page_html = fetch_html(page_url)
+                page_html, _ = fetch_html(page_url)
             except FetchError as e:
                 logger.warning("Pagination fetch failed for %s: %s", page_url, e)
                 break
