@@ -616,29 +616,68 @@ def parse_zlatodomu(html: str, url: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def parse_aurumpro(html: str, url: str) -> list[dict]:
-    vendor = "AurumPro"
-    soup = BeautifulSoup(html, "lxml")
+    vendor = "AurumPro.cz"
+    soup = BeautifulSoup(html, "html.parser")
     products = []
 
-    # 1. Structured data (JSON-LD)
-    structured = parse_structured_data(html)
-    for raw in structured:
-        products.append(normalize_product(raw, vendor, url))
+    # Procházíme všechny tagy article, které mají třídu card-item[cite: 13]
+    for card in soup.select('article.card-item'):
+        try:
+            # Název a URL[cite: 13]
+            title_element = card.select_one('h4.p-i-header a')
+            name = title_element.text.strip() if title_element else None
+            href = title_element['href'] if title_element else None
+            if href and not href.startswith("http"):
+                href = urljoin(url, href)
 
-    # 2. Generic Product Cards
-    if not products:
-        cards = parse_generic_product_cards(soup, url)
-        for raw in cards:
-            # AurumPro je primárně v CZK
-            raw["_currency"] = raw.get("_currency") or "CZK"
-            products.append(normalize_product(raw, vendor, url))
+            # Cena (odstranění pevných i klasických mezer pro infer_price)[cite: 13]
+            price_element = card.select_one('.p-i-price strong')
+            price = None
+            currency = "CZK"
+            if price_element:
+                raw_price_text = price_element.text.replace('\xa0', '').replace(' ', '').strip()
+                price = infer_price(raw_price_text)
+                currency = infer_currency(price_element.text) or "CZK"
 
-    # 3. Generic Links Fallback
+            # Dostupnost[cite: 13]
+            avail_element = card.select_one('.p-i-av')
+            availability = avail_element.text.strip() if avail_element else ""
+
+            # ID produktu z data-atributu[cite: 13]
+            product_number = card.get('data-product-id')
+
+            # Obrázek[cite: 13]
+            img_tag = card.select_one('picture.p-i-img-1 img')
+            image_url = ""
+            if img_tag:
+                image_url = img_tag.get("src", "") or img_tag.get("data-src", "")
+                if image_url:
+                    image_url = urljoin(url, image_url)
+
+            if name and href:
+                raw = {
+                    '_name': name,
+                    '_price': price,
+                    '_currency': currency,
+                    '_availability': availability,
+                    '_image': image_url,
+                    '_url': href,
+                    '_product_number': product_number,
+                }
+                products.append(normalize_product(raw, vendor, url))
+        except Exception as e:
+            logger.warning(f"Chyba při parsování AurumPro položky: {e}")
+
+    # Fallback na generické metody (pro případ, že by se změnila šablona)
     if not products:
-        links = parse_generic_product_links(soup, url)
-        for raw in links:
-            raw["_currency"] = raw.get("_currency") or "CZK"
+        structured = parse_structured_data(html)
+        for raw in structured:
             products.append(normalize_product(raw, vendor, url))
+        if not products:
+            cards = parse_generic_product_cards(soup, url)
+            for raw in cards:
+                raw["_currency"] = raw.get("_currency") or "CZK"
+                products.append(normalize_product(raw, vendor, url))
 
     return deduplicate(products)
 
