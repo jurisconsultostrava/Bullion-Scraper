@@ -87,42 +87,6 @@ JUNK_TEXTS = re.compile(
     r"privacy policy|terms of service)$",
     re.IGNORECASE,
 )
-from bs4 import BeautifulSoup
-
-def parse_zlatodomu(html_content):
-    soup = BeautifulSoup(html_content, 'html.parser')
-    products = []
-
-    # Najdeme všechny tagy article, které reprezentují produkty na stránce
-    for card in soup.select('article.js-product'):
-        try:
-            # Název produktu a odkaz jsou uloženy uvnitř tagu h2 s třídou product-title
-            title_element = card.select_one('h2.product-title a')
-            name = title_element.text.strip() if title_element else None
-            url = title_element['href'] if title_element else None
-
-            # Cena je uložena ve spanu s třídou "price"
-            price_element = card.select_one('span.price')
-            
-            # Text ceny obsahuje tvrdé mezery (&nbsp;), které je dobré vyčistit
-            price = price_element.text.replace('\xa0', ' ').replace('&nbsp;', ' ').strip() if price_element else None
-
-            # Unikátní ID produktu (product_number) je přímo datový atribut tagu article
-            product_number = card.get('data-id-product')
-
-            if name and url:
-                products.append({
-                    'name': name,
-                    'price': price,
-                    'url': url,
-                    'product_number': product_number,
-                    'vendor': 'zlatodomu.cz'
-                })
-        except Exception as e:
-            # Ponecháno pro případné logování chyb u jednotlivých karet
-            print(f"Chyba při parsování položky ZlatoDomu: {e}")
-
-    return products
 
 # ---------------------------------------------------------------------------
 # Vendor detection
@@ -133,14 +97,14 @@ VENDOR_DOMAINS = {
     "europeanmint": ("europeanmint.com",),
     "apmex": ("apmex.com",),
     "bullionbypost": ("bullionbypost.co.uk",),
+    "zlatodomu": ("zlatodomu.cz",),
+    "aurumpro": ("aurumpro.cz",),
 }
-
 
 def _host_matches(host: str, domain: str) -> bool:
     """Exact or subdomain match only — never substring matching, so hosts like
     stonexbullion.com.evil.tld are NOT classified as a known vendor."""
     return host == domain or host.endswith("." + domain)
-
 
 def detect_vendor(url: str) -> str:
     host = urlparse(url).netloc.lower().split(":")[0]
@@ -148,7 +112,6 @@ def detect_vendor(url: str) -> str:
         if any(_host_matches(host, d) for d in domains):
             return vendor
     return "generic"
-
 
 # ---------------------------------------------------------------------------
 # Inference helpers
@@ -161,7 +124,6 @@ def infer_metal(text: str) -> str:
             if kw in text_lower:
                 return metal
     return ""
-
 
 def infer_weight(text: str) -> float | None:
     text_lower = text.lower()
@@ -184,9 +146,7 @@ def infer_weight(text: str) -> float | None:
                 return val
     return None
 
-
 def infer_currency(text: str) -> str:
-    # Check symbols first (order matters: check multi-char before single-char)
     for symbol in ["Kč", "CHF", "AUD", "CAD", "HKD", "SGD", "NZD", "€", "$", "£"]:
         if symbol in text:
             return CURRENCY_SYMBOLS[symbol]
@@ -196,15 +156,10 @@ def infer_currency(text: str) -> str:
             return code
     return ""
 
-
 def infer_price(text: str) -> float | None:
-    # Remove thousands separators and extract first numeric price
-    # Handles: €13,755.99 or €1.355,19 or $4,196.81
     m = re.search(r"[\$€£]?\s?(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?)", text)
     if m:
         raw = m.group(1)
-        # Disambiguate thousands vs decimal separator
-        # If last separator is comma and only 2 digits after → decimal comma
         comma_last = re.search(r",(\d{2})$", raw)
         dot_last = re.search(r"\.(\d{2})$", raw)
         if comma_last:
@@ -221,7 +176,6 @@ def infer_price(text: str) -> float | None:
             pass
     return None
 
-
 def infer_category(url: str) -> str:
     path = urlparse(url).path.lower()
     if "gold" in path:
@@ -234,9 +188,7 @@ def infer_category(url: str) -> str:
         return "palladium"
     return ""
 
-
 def is_junk_name(name: str) -> bool:
-    """Return True if name looks like a menu label rather than a product."""
     stripped = name.strip().lower()
     if stripped in MENU_JUNK_WORDS:
         return True
@@ -245,7 +197,6 @@ def is_junk_name(name: str) -> bool:
     if JUNK_TEXTS.match(stripped):
         return True
     return False
-
 
 # ---------------------------------------------------------------------------
 # Structured data extraction (JSON-LD / schema.org)
@@ -282,7 +233,6 @@ def parse_structured_data(html: str) -> list[dict]:
                         products.append(p)
     return products
 
-
 def _normalize_jsonld_product(item: dict) -> dict | None:
     name = item.get("name", "")
     if not name or is_junk_name(name):
@@ -315,7 +265,6 @@ def _normalize_jsonld_product(item: dict) -> dict | None:
         "_url": url,
     }
 
-
 # ---------------------------------------------------------------------------
 # Metals spot price extraction
 # ---------------------------------------------------------------------------
@@ -338,30 +287,17 @@ def extract_metals(html: str) -> dict:
                 metals[metal] = {"price": price, "diff": None, "percent": None}
     return metals
 
-
 # ---------------------------------------------------------------------------
-# StoneX-specific parser  (TARGETED — anchored to product-thumb-body)
+# StoneX-specific parser
 # ---------------------------------------------------------------------------
 
 STONEX_BASE = "https://stonexbullion.com"
 
-
 def parse_stonex(html: str, url: str) -> list[dict]:
-    """
-    StoneX listing pages use Vue SSR. Real product cards are <a class="product-item ...">
-    that contain a <div class="product-thumb-body"> with:
-      - span.card-title         → product name
-      - div.product-thumb-description → weight (oz) + availability
-      - div.py-3               → price (first child of body with only this class)
-
-    Navigation dropdown items also use the same outer wrapper but LACK the
-    product-thumb-description div, so we use that as the filter gate.
-    """
     vendor = "StoneX Bullion"
     soup = BeautifulSoup(html, "lxml")
     products = []
 
-    # Try structured data first
     structured = parse_structured_data(html)
     for raw in structured:
         products.append(normalize_product(raw, vendor, url))
@@ -369,28 +305,23 @@ def parse_stonex(html: str, url: str) -> list[dict]:
     if products:
         return deduplicate(products)
 
-    # Targeted StoneX selector
     for a in soup.find_all("a", class_=lambda c: c and "product-item" in c):
         body = a.find(class_="product-thumb-body")
         if not body:
             continue
         desc_el = body.find(class_="product-thumb-description")
         if not desc_el:
-            # Nav dropdown items lack this div — skip them
             continue
 
-        # Name: prefer card-title, fall back to img alt
         title_el = body.find(class_="card-title")
         name = title_el.get_text(strip=True) if title_el else ""
         if not name:
             img = a.find("img")
             name = img.get("alt", "") if img else ""
-        # StoneX separates brand with " | " — clean to readable form
         name = " | ".join(p.strip() for p in name.split("|") if p.strip())
         if is_junk_name(name):
             continue
 
-        # Weight + availability from product-thumb-description
         desc_text = desc_el.get_text(strip=True)
         weight_g = infer_weight(desc_text)
         availability = ""
@@ -398,16 +329,12 @@ def parse_stonex(html: str, url: str) -> list[dict]:
         cart_el = body.find(class_="cart-action-container")
         cart_text = cart_el.get_text(strip=True).lower() if cart_el else ""
         if "notify" in cart_text:
-            # "Notify me" button = currently unavailable
             availability = "Out of Stock"
         elif m:
             availability = f"In Stock ({m.group(1).replace(',', '')})"
         else:
-            # If no explicit availability count but product is listed it's likely in stock
             availability = "In Stock"
 
-        # Price: prefer div.product-thumb-price; fall back to the body child
-        # whose only class is "py-3" (older markup variant)
         price = None
         currency = "EUR"
         price_el = body.find(class_="product-thumb-price")
@@ -423,7 +350,6 @@ def parse_stonex(html: str, url: str) -> list[dict]:
             price = infer_price(price_text)
             currency = infer_currency(price_text) or "EUR"
 
-        # Image
         img = a.find("img")
         image_url = ""
         if img:
@@ -431,7 +357,6 @@ def parse_stonex(html: str, url: str) -> list[dict]:
         if image_url and not image_url.startswith("http"):
             image_url = STONEX_BASE + image_url
 
-        # URL
         href = a.get("href", "")
         if href and not href.startswith("http"):
             href = STONEX_BASE + href
@@ -443,12 +368,11 @@ def parse_stonex(html: str, url: str) -> list[dict]:
             "_availability": availability,
             "_image": image_url,
             "_url": href,
-            "_weight_g": weight_g,  # pre-parsed from description (avoids name ambiguity)
+            "_weight_g": weight_g,
         }
         products.append(normalize_product(raw, vendor, url))
 
     return deduplicate(products)
-
 
 # ---------------------------------------------------------------------------
 # Generic link / card parsers
@@ -466,7 +390,6 @@ def _is_product_url(url: str, base_url: str) -> bool:
     if parsed.netloc and parsed.netloc != base_parsed.netloc:
         return False
     return bool(PRODUCT_URL_PATTERNS.search(url))
-
 
 def parse_generic_product_links(soup: BeautifulSoup, base_url: str) -> list[dict]:
     seen = set()
@@ -498,7 +421,6 @@ def parse_generic_product_links(soup: BeautifulSoup, base_url: str) -> list[dict
             "_url": href,
         })
     return results
-
 
 def parse_generic_product_cards(soup: BeautifulSoup, base_url: str) -> list[dict]:
     seen = set()
@@ -577,7 +499,6 @@ def parse_generic_product_cards(soup: BeautifulSoup, base_url: str) -> list[dict
         })
     return results
 
-
 # ---------------------------------------------------------------------------
 # Normalize raw product dict → final product schema
 # ---------------------------------------------------------------------------
@@ -589,8 +510,6 @@ def normalize_product(raw: dict, vendor: str, source_url: str) -> dict:
         url = urljoin(source_url, url)
     text_for_inference = f"{name} {url}"
     metal = infer_metal(text_for_inference)
-    # Use pre-parsed weight if provided by vendor adapter (avoids picking up wrong
-    # numbers like "1g" from "100 x 1g" product names); fall back to name/URL inference
     weight_g = raw.get("_weight_g") or infer_weight(text_for_inference)
     product_number = str(raw.get("_product_number") or "").strip()
     price = raw.get("_price")
@@ -619,7 +538,6 @@ def normalize_product(raw: dict, vendor: str, source_url: str) -> dict:
         "images": [image_url] if image_url else [],
     }
 
-
 def deduplicate(products: list[dict]) -> list[dict]:
     seen = set()
     result = []
@@ -630,6 +548,99 @@ def deduplicate(products: list[dict]) -> list[dict]:
             result.append(p)
     return result
 
+# ---------------------------------------------------------------------------
+# ZlatoDomů.cz adapter
+# ---------------------------------------------------------------------------
+
+def parse_zlatodomu(html: str, url: str) -> list[dict]:
+    vendor = "ZlatoDomů.cz"
+    soup = BeautifulSoup(html, 'html.parser')
+    products = []
+
+    for card in soup.select('article.js-product'):
+        try:
+            title_element = card.select_one('h2.product-title a')
+            name = title_element.text.strip() if title_element else None
+            href = title_element['href'] if title_element else None
+            if href and not href.startswith("http"):
+                href = urljoin(url, href)
+
+            price_element = card.select_one('span.price')
+            price = None
+            currency = "CZK"
+            if price_element:
+                raw_price_text = price_element.text.replace('\xa0', '').replace(' ', '').strip()
+                price = infer_price(raw_price_text)
+                currency = infer_currency(price_element.text) or "CZK"
+
+            product_number = card.get('data-id-product')
+            
+            img_tag = card.find("img")
+            image_url = ""
+            if img_tag:
+                image_url = img_tag.get("src", "") or img_tag.get("data-src", "")
+                if image_url:
+                    image_url = urljoin(url, image_url)
+            
+            avail_tag = card.select_one('.product-available')
+            availability = avail_tag.text.strip() if avail_tag else ""
+
+            if name and href:
+                raw = {
+                    '_name': name,
+                    '_price': price,
+                    '_currency': currency,
+                    '_availability': availability,
+                    '_image': image_url,
+                    '_url': href,
+                    '_product_number': product_number,
+                }
+                products.append(normalize_product(raw, vendor, url))
+        except Exception as e:
+            logger.warning(f"Error parsing ZlatoDomu item: {e}")
+
+    # Fallback to structured data or generic parser if explicit CSS fails
+    if not products:
+        structured = parse_structured_data(html)
+        for raw in structured:
+            products.append(normalize_product(raw, vendor, url))
+        if not products:
+            cards = parse_generic_product_cards(soup, url)
+            for raw in cards:
+                products.append(normalize_product(raw, vendor, url))
+
+    return deduplicate(products)
+
+# ---------------------------------------------------------------------------
+# AurumPro.cz adapter
+# ---------------------------------------------------------------------------
+
+def parse_aurumpro(html: str, url: str) -> list[dict]:
+    vendor = "AurumPro"
+    soup = BeautifulSoup(html, "lxml")
+    products = []
+
+    # 1. Structured data (JSON-LD)
+    structured = parse_structured_data(html)
+    for raw in structured:
+        products.append(normalize_product(raw, vendor, url))
+
+    # 2. Generic Product Cards
+    if not products:
+        cards = parse_generic_product_cards(soup, url)
+        for raw in cards:
+            # AurumPro je primárně v CZK
+            raw["_currency"] = raw.get("_currency") or "CZK"
+            products.append(normalize_product(raw, vendor, url))
+
+    # 3. Generic Links Fallback
+    if not products:
+        links = parse_generic_product_links(soup, url)
+        for raw in links:
+            raw["_currency"] = raw.get("_currency") or "CZK"
+            products.append(normalize_product(raw, vendor, url))
+
+    return deduplicate(products)
 
 # ---------------------------------------------------------------------------
 # European Mint adapter
@@ -698,10 +709,6 @@ def parse_apmex(html: str, url: str) -> list[dict]:
         products.append(normalize_product(raw, vendor, url))
 
     if not products:
-        # APMEX renders its product grid client-side (JavaScript), so category
-        # pages only server-render a handful of promoted /product/ links.
-        # Parse those explicitly; never fall back to generic link scraping,
-        # which would only pick up navigation/category labels.
         seen_hrefs = set()
         for a_el in soup.select("a[href^='/product/']"):
             href = a_el.get("href", "")
@@ -741,14 +748,6 @@ def parse_apmex(html: str, url: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def parse_bullionbypost(html: str, url: str) -> list[dict]:
-    """BullionByPost renders cards as div.card.category-module (category hub
-    pages) or div.card.product-module (product listing pages). Both share:
-      - p.product-name > a          -> name + product/category URL
-      - span.price                  -> price (first one; page duplicates it
-                                       for mobile/desktop layouts)
-      - .stock-message              -> availability badge
-      - .product-image img          -> image
-    """
     vendor = "BullionByPost"
     soup = BeautifulSoup(html, "lxml")
     products = []
@@ -770,7 +769,6 @@ def parse_bullionbypost(html: str, url: str) -> list[dict]:
             price = infer_price(price_el.get_text()) if price_el else None
             stock_el = card.select_one(".stock-message")
             availability = stock_el.get_text(strip=True) if stock_el else ""
-            # BBP exposes its product id on the price element
             pid_el = card.select_one("[data-price-product-id]")
             product_number = pid_el.get("data-price-product-id", "") if pid_el else ""
             img = card.select_one(".product-image img") or card.find("img")
@@ -841,6 +839,8 @@ VENDOR_ADAPTERS = {
     "europeanmint": parse_european_mint,
     "apmex": parse_apmex,
     "bullionbypost": parse_bullionbypost,
+    "zlatodomu": parse_zlatodomu,
+    "aurumpro": parse_aurumpro,
     "generic": parse_generic,
 }
 
@@ -849,28 +849,21 @@ VENDOR_DISPLAY_NAMES = {
     "europeanmint": "European Mint",
     "apmex": "APMEX",
     "bullionbypost": "BullionByPost",
+    "zlatodomu": "ZlatoDomů.cz",
+    "aurumpro": "AurumPro.cz",
     "generic": "Generic",
 }
-
 
 class FetchError(Exception):
     def __init__(self, message: str, status: int | None = None):
         super().__init__(message)
         self.status = status
 
-
-# TLS impersonation profiles tried in order. Many bullion sites sit behind
-# Cloudflare, which fingerprints the TLS handshake; firefox/safari profiles
-# currently pass where chrome profiles are challenged.
 IMPERSONATE_PROFILES = ["firefox135", "safari18_0", "chrome131"]
 
 CF_CHALLENGE_MARKERS = ("just a moment", "challenges.cloudflare.com")
 
-
 def fetch_html(url: str) -> tuple[str, str]:
-    """Fetch a URL and return (html, final_url). final_url reflects redirects
-    (e.g. www.stonexbullion.com/gold-bars/ -> stonexbullion.com/en/gold-bars/),
-    which matters for pagination link matching and relative URL resolution."""
     last_error: str = "unknown error"
     last_status: int | None = None
     for profile in IMPERSONATE_PROFILES:
@@ -899,13 +892,9 @@ def fetch_html(url: str) -> tuple[str, str]:
             last_error = f"upstream returned HTTP {resp.status_code} (profile {profile})"
     raise FetchError(last_error, status=last_status)
 
-
 MAX_PAGES = 5
 
-
 def find_pagination_urls(html: str, url: str) -> list[str]:
-    """Detect ?page=N pagination links pointing at the same path and return
-    URLs for pages 2..N (capped at MAX_PAGES)."""
     soup = BeautifulSoup(html, "lxml")
     base = urlparse(url)
     page_numbers = set()
@@ -925,14 +914,8 @@ def find_pagination_urls(html: str, url: str) -> list[str]:
     sep = "&" if "?" in clean else "?"
     return [f"{clean}{sep}page={n}" for n in range(2, last_page + 1)]
 
-
 # ---------------------------------------------------------------------------
 # Product-number enrichment (StoneX)
-#
-# StoneX listing cards do not expose the product number; it only appears on
-# each product detail page (JSON-LD "sku" + a "Product number" table row).
-# We fetch detail pages concurrently and cache results in memory, since
-# product numbers never change for a given URL.
 # ---------------------------------------------------------------------------
 
 import threading
@@ -947,14 +930,12 @@ _PN_ROW_RE = re.compile(
 ENRICH_MAX_WORKERS = 6
 ENRICH_TIMEOUT = 15
 
-
 def _is_stonex_url(product_url: str) -> bool:
     try:
         host = urlparse(product_url).netloc.lower().split(":")[0]
     except Exception:
         return False
     return any(_host_matches(host, d) for d in VENDOR_DOMAINS["stonex"])
-
 
 def _fetch_stonex_product_number(product_url: str) -> str:
     with _product_number_cache_lock:
@@ -976,10 +957,7 @@ def _fetch_stonex_product_number(product_url: str) -> str:
         logger.warning("Product-number fetch failed for %s", product_url)
         return ""
 
-
 def enrich_stonex_product_numbers(products: list[dict]) -> None:
-    # SSRF guard: only ever fetch URLs on the real StoneX domain. Product URLs
-    # come from scraped HTML, which must be treated as untrusted input.
     targets = [
         p for p in products
         if not p.get("product_number") and _is_stonex_url(p.get("url", ""))
@@ -993,17 +971,10 @@ def enrich_stonex_product_numbers(products: list[dict]) -> None:
         for fut in as_completed(futures):
             futures[fut]["product_number"] = fut.result()
 
-
 _gallery_cache: dict[str, list] = {}
 _gallery_cache_lock = threading.Lock()
 
-
 def _fetch_stonex_gallery(product_url: str) -> list[str]:
-    """Fetch the full image gallery for a StoneX product via the router API
-    (POST /api/client/router/ with the product path). Product detail pages
-    cannot be rendered server-side (StoneX SSR returns 502), but this JSON
-    API returns product.images.list — one <picture> snippet per gallery
-    photo — from which we extract the 1x URLs."""
     path = urlparse(product_url).path
     with _gallery_cache_lock:
         if path in _gallery_cache:
@@ -1032,10 +1003,7 @@ def _fetch_stonex_gallery(product_url: str) -> list[str]:
         logger.warning("Gallery fetch failed for %s", product_url)
         return []
 
-
 def enrich_stonex_galleries(products: list[dict]) -> None:
-    # SSRF guard: only ever call the router API for URLs on the real StoneX
-    # domain (the path is taken from the product URL, which is scraped data).
     targets = [p for p in products if _is_stonex_url(p.get("url", ""))]
     if not targets:
         return
@@ -1049,26 +1017,16 @@ def enrich_stonex_galleries(products: list[dict]) -> None:
             if gallery:
                 p["images"] = gallery
 
-
 def enrich_stonex(products: list[dict]) -> None:
     enrich_stonex_product_numbers(products)
     enrich_stonex_galleries(products)
-
 
 ENRICHERS = {
     "stonex": enrich_stonex,
 }
 
-
 # ---------------------------------------------------------------------------
 # StoneX catalog JSON API
-#
-# StoneX is a Nuxt SPA; its /en/search/ pages cannot be rendered server-side
-# (their own SSR returns HTTP 502 for them). The frontend loads listings via
-# POST /api/client/catalog/ with the page path + filters in the JSON body and
-# the display currency in an X-Currency header. This API also serves regular
-# category pages (body {"url": "/en/gold-bars/"}) and returns part_number
-# directly, so no per-product detail-page enrichment is needed.
 # ---------------------------------------------------------------------------
 
 STONEX_API_URL = "https://stonexbullion.com/api/client/catalog/"
@@ -1083,10 +1041,7 @@ STONEX_AVAILABILITY_LABELS = {
     "pre_sale": "Pre-Sale",
 }
 
-
 def _parse_bracket_params(query: str) -> dict:
-    """Convert 'type_ids[0]=2&type_ids[1]=3&term=x' into
-    {'type_ids': [2, 3], 'term': 'x'} for the StoneX API body."""
     params: dict = {}
     for key, value in parse_qsl(query, keep_blank_values=False):
         base = key.split("[", 1)[0]
@@ -1098,7 +1053,6 @@ def _parse_bracket_params(query: str) -> dict:
             params[base] = value
     params.pop("page", None)
     return params
-
 
 def _stonex_api_page(body: dict, currency: str) -> dict:
     resp = cffi_requests.post(
@@ -1117,12 +1071,9 @@ def _stonex_api_page(body: dict, currency: str) -> dict:
         raise FetchError(f"StoneX API error: {data.get('message') or data.get('code')}")
     return data["data"]["catalog"]
 
-
 _SRCSET_RE = re.compile(r'srcset="([^"]+)"')
 
-
 def _parse_srcset(picture_html: str) -> dict[str, str]:
-    """Extract {'1x': url, '2x': url} from a <picture> srcset attribute."""
     m = _SRCSET_RE.search(picture_html or "")
     if not m:
         return {}
@@ -1135,7 +1086,6 @@ def _parse_srcset(picture_html: str) -> dict[str, str]:
             out.setdefault("1x", parts[0])
     return out
 
-
 def _stonex_api_product_to_raw(p: dict) -> dict:
     avail = p.get("availability") or {}
     code = avail.get("code", "")
@@ -1146,8 +1096,6 @@ def _stonex_api_product_to_raw(p: dict) -> dict:
     image = ""
     image_2x = ""
     if isinstance(images, dict):
-        # "main" holds a <picture> snippet with full-size 1x/2x webp URLs;
-        # prefer those over the "small" thumbnail.
         srcset = _parse_srcset(images.get("main", ""))
         image = srcset.get("1x", "") or images.get("small", "")
         image_2x = srcset.get("2x", "")
@@ -1161,10 +1109,7 @@ def _stonex_api_product_to_raw(p: dict) -> dict:
         "_product_number": p.get("part_number", ""),
     }
 
-
 def scrape_stonex_api(url: str, currency: str) -> tuple[list[dict], int]:
-    """Scrape a StoneX listing/search URL via the catalog JSON API.
-    Returns (products, pages_fetched). Raises FetchError on API failure."""
     parsed = urlparse(url)
     body = _parse_bracket_params(parsed.query)
     body["url"] = parsed.path
@@ -1186,7 +1131,6 @@ def scrape_stonex_api(url: str, currency: str) -> tuple[list[dict], int]:
         products.append(normalize_product(raw, "stonex", url))
     return deduplicate(products), pages_fetched
 
-
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -1195,21 +1139,17 @@ def scrape_stonex_api(url: str, currency: str) -> tuple[list[dict], int]:
 def add_cors(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    # Prevent the preview browser from serving a stale cached frontend
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     response.headers["Pragma"] = "no-cache"
     return response
-
 
 @app.route("/")
 def index():
     return render_template("index.html")
 
-
 @app.route("/health")
 def health():
     return jsonify({"ok": True, "service": "bullion-multi-scraper", "version": "v1"})
-
 
 @app.route("/fetch")
 def fetch_route():
@@ -1221,7 +1161,6 @@ def fetch_route():
         return Response(html, status=200, mimetype="text/plain")
     except FetchError as e:
         return Response(f"Fetch error: {e}", status=502, mimetype="text/plain")
-
 
 @app.route("/scrape")
 def scrape_route():
@@ -1235,10 +1174,6 @@ def scrape_route():
                      f"Supported: {', '.join(sorted(STONEX_CURRENCIES))}"
         }), 400
 
-    # StoneX: use the catalog JSON API (handles /search/ URLs that their SSR
-    # can't render, supports currency selection, returns product numbers
-    # directly, and paginates reliably). Falls back to HTML scraping if the
-    # API yields nothing (e.g. product detail pages).
     if detect_vendor(url) == "stonex":
         try:
             products, pages_fetched = scrape_stonex_api(url, currency)
@@ -1265,8 +1200,7 @@ def scrape_route():
         html, final_url = fetch_html(url)
     except FetchError as e:
         return jsonify({"error": f"Fetch failed: {e}", "upstream_status": e.status}), 502
-    # Use the post-redirect URL for vendor detection, relative-URL resolution
-    # and pagination matching (e.g. www.../gold-bars/ redirects to /en/gold-bars/).
+
     url = final_url
     vendor_key = detect_vendor(url)
     adapter = VENDOR_ADAPTERS.get(vendor_key, parse_generic)
@@ -1276,8 +1210,6 @@ def scrape_route():
         logger.exception("Parser error for %s", url)
         return jsonify({"error": f"Parse error: {e}"}), 500
 
-    # Follow pagination (?page=N links on the same path), unless the caller
-    # already requested a specific page.
     pages_fetched = 1
     if "page=" not in url:
         for page_url in find_pagination_urls(html, url):
