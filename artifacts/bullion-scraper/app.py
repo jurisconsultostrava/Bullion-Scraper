@@ -680,7 +680,6 @@ def parse_aurumpro(html: str, url: str) -> list[dict]:
                 products.append(normalize_product(raw, vendor, url))
 
     return deduplicate(products)
-
 # ---------------------------------------------------------------------------
 # European Mint adapter
 # ---------------------------------------------------------------------------
