@@ -87,7 +87,42 @@ JUNK_TEXTS = re.compile(
     r"privacy policy|terms of service)$",
     re.IGNORECASE,
 )
+from bs4 import BeautifulSoup
 
+def parse_zlatodomu(html_content):
+    soup = BeautifulSoup(html_content, 'html.parser')
+    products = []
+
+    # Najdeme všechny tagy article, které reprezentují produkty na stránce
+    for card in soup.select('article.js-product'):
+        try:
+            # Název produktu a odkaz jsou uloženy uvnitř tagu h2 s třídou product-title
+            title_element = card.select_one('h2.product-title a')
+            name = title_element.text.strip() if title_element else None
+            url = title_element['href'] if title_element else None
+
+            # Cena je uložena ve spanu s třídou "price"
+            price_element = card.select_one('span.price')
+            
+            # Text ceny obsahuje tvrdé mezery (&nbsp;), které je dobré vyčistit
+            price = price_element.text.replace('\xa0', ' ').replace('&nbsp;', ' ').strip() if price_element else None
+
+            # Unikátní ID produktu (product_number) je přímo datový atribut tagu article
+            product_number = card.get('data-id-product')
+
+            if name and url:
+                products.append({
+                    'name': name,
+                    'price': price,
+                    'url': url,
+                    'product_number': product_number,
+                    'vendor': 'zlatodomu.cz'
+                })
+        except Exception as e:
+            # Ponecháno pro případné logování chyb u jednotlivých karet
+            print(f"Chyba při parsování položky ZlatoDomu: {e}")
+
+    return products
 
 # ---------------------------------------------------------------------------
 # Vendor detection
