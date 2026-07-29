@@ -157,7 +157,8 @@ def infer_currency(text: str) -> str:
     return ""
 
 def infer_price(text: str) -> float | None:
-    m = re.search(r"[\$€£]?\s?(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?)", text)
+    # Změněno \d{1,3} na \d+ aby to bralo i velká čísla bez mezer
+    m = re.search(r"[\$€£]?\s?(\d+(?:[.,]\d{3})*(?:[.,]\d{1,2})?)", text)
     if m:
         raw = m.group(1)
         comma_last = re.search(r",(\d{2})$", raw)
@@ -620,17 +621,14 @@ def parse_aurumpro(html: str, url: str) -> list[dict]:
     soup = BeautifulSoup(html, "html.parser")
     products = []
 
-    # Procházíme všechny tagy article, které mají třídu card-item[cite: 13]
     for card in soup.select('article.card-item'):
         try:
-            # Název a URL[cite: 13]
             title_element = card.select_one('h4.p-i-header a')
             name = title_element.text.strip() if title_element else None
             href = title_element['href'] if title_element else None
             if href and not href.startswith("http"):
                 href = urljoin(url, href)
 
-            # Cena (odstranění pevných i klasických mezer pro infer_price)[cite: 13]
             price_element = card.select_one('.p-i-price strong')
             price = None
             currency = "CZK"
@@ -639,14 +637,11 @@ def parse_aurumpro(html: str, url: str) -> list[dict]:
                 price = infer_price(raw_price_text)
                 currency = infer_currency(price_element.text) or "CZK"
 
-            # Dostupnost[cite: 13]
             avail_element = card.select_one('.p-i-av')
             availability = avail_element.text.strip() if avail_element else ""
 
-            # ID produktu z data-atributu[cite: 13]
             product_number = card.get('data-product-id')
 
-            # Obrázek[cite: 13]
             img_tag = card.select_one('picture.p-i-img-1 img')
             image_url = ""
             if img_tag:
@@ -668,7 +663,6 @@ def parse_aurumpro(html: str, url: str) -> list[dict]:
         except Exception as e:
             logger.warning(f"Chyba při parsování AurumPro položky: {e}")
 
-    # Fallback na generické metody (pro případ, že by se změnila šablona)
     if not products:
         structured = parse_structured_data(html)
         for raw in structured:
@@ -680,6 +674,7 @@ def parse_aurumpro(html: str, url: str) -> list[dict]:
                 products.append(normalize_product(raw, vendor, url))
 
     return deduplicate(products)
+
 # ---------------------------------------------------------------------------
 # European Mint adapter
 # ---------------------------------------------------------------------------
