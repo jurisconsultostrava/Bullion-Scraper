@@ -157,10 +157,13 @@ def infer_currency(text: str) -> str:
     return ""
 
 def infer_price(text: str) -> float | None:
-    # Změněno \d{1,3} na \d+ aby to bralo i velká čísla bez mezer
-    m = re.search(r"[\$€£]?\s?(\d+(?:[.,]\d{3})*(?:[.,]\d{1,2})?)", text)
+    # Opravený regex pro zachycení celého čísla i s mezerami (změna z \d{1,3} na \d+)
+    m = re.search(r"[\$€£]?\s?(\d+(?:[.,\s\xa0]\d{3})*(?:[.,]\d{1,2})?)", text)
     if m:
         raw = m.group(1)
+        # Odstraníme pripadné mezery (aby parsování níže nespadlo)
+        raw = re.sub(r"[\s\xa0]", "", raw)
+        
         comma_last = re.search(r",(\d{2})$", raw)
         dot_last = re.search(r"\.(\d{2})$", raw)
         if comma_last:
@@ -276,8 +279,9 @@ def extract_metals(html: str) -> dict:
     text = soup.get_text(separator=" ")
     metal_names = ["gold", "silver", "platinum", "palladium", "rhodium"]
     for metal in metal_names:
+        # Opravený regex i pro velké ceny spotu (nad 9999 USD bez tečky)
         pattern = re.compile(
-            rf"{metal}[^$€£\d]{{0,30}}([€$£]?\s?\d{{1,3}}(?:[,.\s]\d{{3}})*(?:[,.\s]\d{{1,2}})?)",
+            rf"{metal}[^$€£\d]{{0,30}}([€$£]?\s?\d+(?:[,.\s\xa0]\d{{3}})*(?:[,.\s]\d{{1,2}})?)",
             re.IGNORECASE,
         )
         m = pattern.search(text)
