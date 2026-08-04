@@ -102,8 +102,7 @@ VENDOR_DOMAINS = {
 }
 
 def _host_matches(host: str, domain: str) -> bool:
-    """Exact or subdomain match only — never substring matching, so hosts like
-    stonexbullion.com.evil.tld are NOT classified as a known vendor."""
+    """Exact or subdomain match only — never substring matching."""
     return host == domain or host.endswith("." + domain)
 
 def detect_vendor(url: str) -> str:
@@ -157,26 +156,37 @@ def infer_currency(text: str) -> str:
     return ""
 
 def infer_price(text: str) -> float | None:
-    # Odstraníme běžné i pevné mezery rovnou z celého textu před regexem
+    if not text:
+        return None
+    # Zcela neprůstřelná metoda:
+    # 1. Nejprve odstraníme veškeré myslitelné mezery (včetně pevných \xa0 apod.)
     clean_text = re.sub(r"[\s\xa0]", "", text)
-    # Změněno z \d{1,3} na \d+ aby se nenačítala jen první 3 čísla u velkých sum
-    m = re.search(r"[\$€£]?(\d+(?:[.,]\d{3})*(?:[.,]\d{1,2})?)", clean_text)
-    if m:
-        raw = m.group(1)
-        comma_last = re.search(r",(\d{2})$", raw)
-        dot_last = re.search(r"\.(\d{2})$", raw)
-        if comma_last:
-            raw = raw.replace(".", "").replace(",", ".")
-        elif dot_last:
-            raw = raw.replace(",", "")
-        else:
-            raw = raw.replace(",", "").replace(".", "")
-        try:
-            val = float(raw)
-            if val > 0.5:
-                return val
-        except ValueError:
-            pass
+    
+    # 2. Vytáhneme pouze čistý blok s číslicemi, tečkami a čárkami
+    m = re.search(r"([\d.,]+)", clean_text)
+    if not m:
+        return None
+        
+    raw = m.group(1).rstrip(",.")
+    
+    # 3. Určíme oddělovač desetinných míst
+    comma_last = re.search(r",(\d{1,2})$", raw)
+    dot_last = re.search(r"\.(\d{1,2})$", raw)
+    
+    if comma_last:
+        raw = raw.replace(".", "").replace(",", ".")
+    elif dot_last:
+        raw = raw.replace(",", "")
+    else:
+        # Pokud číslo nemá desetinná místa, všechno ostatní jsou jen oddělovače tisíců (zahoď je)
+        raw = raw.replace(",", "").replace(".", "")
+        
+    try:
+        val = float(raw)
+        if val > 0.5:
+            return val
+    except ValueError:
+        pass
     return None
 
 def infer_category(url: str) -> str:
@@ -278,9 +288,9 @@ def extract_metals(html: str) -> dict:
     text = soup.get_text(separator=" ")
     metal_names = ["gold", "silver", "platinum", "palladium", "rhodium"]
     for metal in metal_names:
-        # Přidána podpora mezer v číslech (\d+ a \s\xa0 jako možné oddělovače)
+        # Zjednodušený vzor – necháme těžkou práci na infer_price
         pattern = re.compile(
-            rf"{metal}[^$€£\d]{{0,30}}([€$£]?\s?\d+(?:[,.\s\xa0]\d{{3}})*(?:[,.\s]\d{{1,2}})?)",
+            rf"{metal}[^$€£\d]{{0,30}}([€$£]?\s*[\d\s\xa0]+(?:[,.]\d{{1,2}})?)",
             re.IGNORECASE,
         )
         m = pattern.search(text)
@@ -573,8 +583,7 @@ def parse_zlatodomu(html: str, url: str) -> list[dict]:
             price = None
             currency = "CZK"
             if price_element:
-                raw_price_text = price_element.text.replace('\xa0', '').replace(' ', '').strip()
-                price = infer_price(raw_price_text)
+                price = infer_price(price_element.text)
                 currency = infer_currency(price_element.text) or "CZK"
 
             product_number = card.get('data-id-product')
@@ -636,8 +645,7 @@ def parse_aurumpro(html: str, url: str) -> list[dict]:
             price = None
             currency = "CZK"
             if price_element:
-                raw_price_text = price_element.text.replace('\xa0', '').replace(' ', '').strip()
-                price = infer_price(raw_price_text)
+                price = infer_price(price_element.text)
                 currency = infer_currency(price_element.text) or "CZK"
 
             avail_element = card.select_one('.p-i-av')
