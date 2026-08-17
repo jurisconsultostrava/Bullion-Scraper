@@ -99,6 +99,7 @@ VENDOR_DOMAINS = {
     "bullionbypost": ("bullionbypost.co.uk",),
     "zlatodomu": ("zlatodomu.cz",),
     "aurumpro": ("aurumpro.cz",),
+    "goldenhouse": ("goldenhouse.cz",),
 }
 
 def _host_matches(host: str, domain: str) -> bool:
@@ -687,6 +688,97 @@ def parse_aurumpro(html: str, url: str) -> list[dict]:
     return deduplicate(products)
 
 # ---------------------------------------------------------------------------
+# GoldenHouse.cz adapter
+# ---------------------------------------------------------------------------
+
+def parse_goldenhouse(html: str, url: str) -> list[dict]:
+    """Parse GoldenHouse category and product pages.
+
+    GoldenHouse uses its own product codes, so these codes are useful as a
+    competitor identifier rather than as a Shoptet pairing key.  Matching to
+    our catalog should primarily use normalized name + metal + weight.
+    """
+    vendor = "GoldenHouse.cz"
+    soup = BeautifulSoup(html, "lxml")
+    products: list[dict] = []
+
+    # 1) Prefer JSON-LD / structured product data where available.
+    for raw in parse_structured_data(html):
+        p = normalize_product(raw, vendor, url)
+        if p.get("name") and p.get("price") is not None:
+            products.append(p)
+
+    # 2) Product detail page fallback.  Public pages expose labels such as
+    #    "Kód:", "Hmotnost:" and the visible selling price.
+    page_text = " ".join(soup.stripped_strings)
+    h1 = soup.find("h1")
+    name = h1.get_text(" ", strip=True) if h1 else ""
+
+    code_match = re.search(r"(?:K[oó]d|Code)\s*:\s*([A-Za-z0-9._/-]+)", page_text, re.IGNORECASE)
+    weight_match = re.search(r"(?:Hmotnost|V[aá]ha|Weight)\s*:\s*(\d+(?:[.,]\d+)?)\s*(g|kg|oz)", page_text, re.IGNORECASE)
+
+    # Selling price: take the first CZK amount after the title/code area and
+    # explicitly avoid buyback / deferred-delivery labels.
+    price = None
+    currency = "CZK"
+    price_candidates = []
+    for m in re.finditer(r"(\d{1,3}(?:[\s\u00a0]\d{3})*(?:[.,]\d{1,2})?)\s*K[cč]", page_text, re.IGNORECASE):
+        left = page_text[max(0, m.start()-80):m.start()].lower()
+        if any(x in left for x in ("výkup", "buyback", "odložen", "termínovan", "zvýhodněn")):
+            continue
+        val = infer_price(m.group(0))
+        if val is not None:
+            price_candidates.append(val)
+    if price_candidates:
+        price = price_candidates[0]
+
+    availability = ""
+    for pat in (
+        r"Skladem",
+        r"Dostupn(?:é|y)[^.;|]{0,40}",
+        r"Available[^.;|]{0,40}",
+        r"Doručení[^.;|]{0,40}",
+    ):
+        m = re.search(pat, page_text, re.IGNORECASE)
+        if m:
+            availability = m.group(0).strip()
+            break
+
+    img = ""
+    og = soup.find("meta", property="og:image")
+    if og and og.get("content"):
+        img = urljoin(url, og.get("content"))
+    if not img:
+        it = soup.select_one('img[itemprop="image"], .product img, main img')
+        if it:
+            img = urljoin(url, it.get("src") or it.get("data-src") or "")
+
+    if name and price is not None:
+        raw = {
+            "_name": name,
+            "_price": price,
+            "_currency": currency,
+            "_availability": availability,
+            "_image": img,
+            "_url": url,
+            "_product_number": code_match.group(1) if code_match else "",
+        }
+        if weight_match:
+            val = float(weight_match.group(1).replace(",", "."))
+            unit = weight_match.group(2).lower()
+            raw["_weight_g"] = val * (1000 if unit == "kg" else 31.1034768 if unit == "oz" else 1)
+        products.append(normalize_product(raw, vendor, url))
+
+    # 3) Category/list fallback using anchors/cards around product links.
+    if not products:
+        cards = parse_generic_product_cards(soup, url)
+        for raw in cards:
+            raw["_currency"] = raw.get("_currency") or "CZK"
+            products.append(normalize_product(raw, vendor, url))
+
+    return deduplicate(products)
+
+# ---------------------------------------------------------------------------
 # European Mint adapter
 # ---------------------------------------------------------------------------
 
@@ -885,6 +977,7 @@ VENDOR_ADAPTERS = {
     "bullionbypost": parse_bullionbypost,
     "zlatodomu": parse_zlatodomu,
     "aurumpro": parse_aurumpro,
+    "goldenhouse": parse_goldenhouse,
     "generic": parse_generic,
 }
 
@@ -895,6 +988,7 @@ VENDOR_DISPLAY_NAMES = {
     "bullionbypost": "BullionByPost",
     "zlatodomu": "ZlatoDomů.cz",
     "aurumpro": "AurumPro.cz",
+    "goldenhouse": "GoldenHouse.cz",
     "generic": "Generic",
 }
 
