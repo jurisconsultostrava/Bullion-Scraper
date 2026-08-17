@@ -99,7 +99,6 @@ VENDOR_DOMAINS = {
     "bullionbypost": ("bullionbypost.co.uk",),
     "zlatodomu": ("zlatodomu.cz",),
     "aurumpro": ("aurumpro.cz",),
-    "goldenhouse": ("goldenhouse.cz",),
 }
 
 def _host_matches(host: str, domain: str) -> bool:
@@ -688,97 +687,6 @@ def parse_aurumpro(html: str, url: str) -> list[dict]:
     return deduplicate(products)
 
 # ---------------------------------------------------------------------------
-# GoldenHouse.cz adapter
-# ---------------------------------------------------------------------------
-
-def parse_goldenhouse(html: str, url: str) -> list[dict]:
-    """Parse GoldenHouse category and product pages.
-
-    GoldenHouse uses its own product codes, so these codes are useful as a
-    competitor identifier rather than as a Shoptet pairing key.  Matching to
-    our catalog should primarily use normalized name + metal + weight.
-    """
-    vendor = "GoldenHouse.cz"
-    soup = BeautifulSoup(html, "lxml")
-    products: list[dict] = []
-
-    # 1) Prefer JSON-LD / structured product data where available.
-    for raw in parse_structured_data(html):
-        p = normalize_product(raw, vendor, url)
-        if p.get("name") and p.get("price") is not None:
-            products.append(p)
-
-    # 2) Product detail page fallback.  Public pages expose labels such as
-    #    "Kód:", "Hmotnost:" and the visible selling price.
-    page_text = " ".join(soup.stripped_strings)
-    h1 = soup.find("h1")
-    name = h1.get_text(" ", strip=True) if h1 else ""
-
-    code_match = re.search(r"(?:K[oó]d|Code)\s*:\s*([A-Za-z0-9._/-]+)", page_text, re.IGNORECASE)
-    weight_match = re.search(r"(?:Hmotnost|V[aá]ha|Weight)\s*:\s*(\d+(?:[.,]\d+)?)\s*(g|kg|oz)", page_text, re.IGNORECASE)
-
-    # Selling price: take the first CZK amount after the title/code area and
-    # explicitly avoid buyback / deferred-delivery labels.
-    price = None
-    currency = "CZK"
-    price_candidates = []
-    for m in re.finditer(r"(\d{1,3}(?:[\s\u00a0]\d{3})*(?:[.,]\d{1,2})?)\s*K[cč]", page_text, re.IGNORECASE):
-        left = page_text[max(0, m.start()-80):m.start()].lower()
-        if any(x in left for x in ("výkup", "buyback", "odložen", "termínovan", "zvýhodněn")):
-            continue
-        val = infer_price(m.group(0))
-        if val is not None:
-            price_candidates.append(val)
-    if price_candidates:
-        price = price_candidates[0]
-
-    availability = ""
-    for pat in (
-        r"Skladem",
-        r"Dostupn(?:é|y)[^.;|]{0,40}",
-        r"Available[^.;|]{0,40}",
-        r"Doručení[^.;|]{0,40}",
-    ):
-        m = re.search(pat, page_text, re.IGNORECASE)
-        if m:
-            availability = m.group(0).strip()
-            break
-
-    img = ""
-    og = soup.find("meta", property="og:image")
-    if og and og.get("content"):
-        img = urljoin(url, og.get("content"))
-    if not img:
-        it = soup.select_one('img[itemprop="image"], .product img, main img')
-        if it:
-            img = urljoin(url, it.get("src") or it.get("data-src") or "")
-
-    if name and price is not None:
-        raw = {
-            "_name": name,
-            "_price": price,
-            "_currency": currency,
-            "_availability": availability,
-            "_image": img,
-            "_url": url,
-            "_product_number": code_match.group(1) if code_match else "",
-        }
-        if weight_match:
-            val = float(weight_match.group(1).replace(",", "."))
-            unit = weight_match.group(2).lower()
-            raw["_weight_g"] = val * (1000 if unit == "kg" else 31.1034768 if unit == "oz" else 1)
-        products.append(normalize_product(raw, vendor, url))
-
-    # 3) Category/list fallback using anchors/cards around product links.
-    if not products:
-        cards = parse_generic_product_cards(soup, url)
-        for raw in cards:
-            raw["_currency"] = raw.get("_currency") or "CZK"
-            products.append(normalize_product(raw, vendor, url))
-
-    return deduplicate(products)
-
-# ---------------------------------------------------------------------------
 # European Mint adapter
 # ---------------------------------------------------------------------------
 
@@ -977,7 +885,6 @@ VENDOR_ADAPTERS = {
     "bullionbypost": parse_bullionbypost,
     "zlatodomu": parse_zlatodomu,
     "aurumpro": parse_aurumpro,
-    "goldenhouse": parse_goldenhouse,
     "generic": parse_generic,
 }
 
@@ -988,7 +895,6 @@ VENDOR_DISPLAY_NAMES = {
     "bullionbypost": "BullionByPost",
     "zlatodomu": "ZlatoDomů.cz",
     "aurumpro": "AurumPro.cz",
-    "goldenhouse": "GoldenHouse.cz",
     "generic": "Generic",
 }
 
@@ -1067,6 +973,90 @@ _PN_ROW_RE = re.compile(
 )
 ENRICH_MAX_WORKERS = 6
 ENRICH_TIMEOUT = 15
+
+# ---------------------------------------------------------------------------
+# AurumPro product-code enrichment
+# ---------------------------------------------------------------------------
+
+_aurumpro_product_number_cache: dict[str, str] = {}
+_aurumpro_product_number_cache_lock = threading.Lock()
+_AURUMPRO_PRODUCT_CODE_RE = re.compile(
+    r"K[oó]d\s+produktu\s*:\s*([A-Za-z0-9._/-]+)",
+    re.IGNORECASE,
+)
+
+
+def _is_aurumpro_url(product_url: str) -> bool:
+    try:
+        host = (urlparse(product_url).hostname or "").lower()
+    except Exception:
+        return False
+    return any(_host_matches(host, d) for d in VENDOR_DOMAINS["aurumpro"])
+
+
+def _extract_aurumpro_product_number(html: str) -> str:
+    """Extract public AurumPro 'Kód produktu', not internal Upgates ID."""
+    soup = BeautifulSoup(html, "lxml")
+    page_text = soup.get_text(" ", strip=True)
+    m = _AURUMPRO_PRODUCT_CODE_RE.search(page_text)
+    if m:
+        return m.group(1).strip()
+
+    simplified = re.sub(r"<[^>]+>", " ", html)
+    simplified = re.sub(r"\s+", " ", simplified)
+    m = _AURUMPRO_PRODUCT_CODE_RE.search(simplified)
+    return m.group(1).strip() if m else ""
+
+
+def _fetch_aurumpro_product_number(product_url: str) -> str:
+    with _aurumpro_product_number_cache_lock:
+        if product_url in _aurumpro_product_number_cache:
+            return _aurumpro_product_number_cache[product_url]
+
+    try:
+        resp = cffi_requests.get(
+            product_url,
+            impersonate="firefox135",
+            timeout=ENRICH_TIMEOUT,
+        )
+        if resp.status_code != 200:
+            logger.warning(
+                "AurumPro product-code fetch returned HTTP %s for %s",
+                resp.status_code,
+                product_url,
+            )
+            return ""
+
+        number = _extract_aurumpro_product_number(resp.text)
+        if number:
+            with _aurumpro_product_number_cache_lock:
+                _aurumpro_product_number_cache[product_url] = number
+        return number
+    except Exception:
+        logger.warning("AurumPro product-code fetch failed for %s", product_url)
+        return ""
+
+
+def enrich_aurumpro_product_numbers(products: list[dict]) -> None:
+    """Overwrite internal AurumPro listing IDs with public product codes."""
+    targets = [
+        p for p in products
+        if p.get("url") and _is_aurumpro_url(p.get("url", ""))
+    ]
+    if not targets:
+        return
+
+    with ThreadPoolExecutor(max_workers=ENRICH_MAX_WORKERS) as pool:
+        futures = {
+            pool.submit(_fetch_aurumpro_product_number, p["url"]): p
+            for p in targets
+        }
+        for fut in as_completed(futures):
+            product = futures[fut]
+            number = fut.result()
+            if number:
+                product["product_number"] = number
+
 
 def _is_stonex_url(product_url: str) -> bool:
     try:
@@ -1161,6 +1151,7 @@ def enrich_stonex(products: list[dict]) -> None:
 
 ENRICHERS = {
     "stonex": enrich_stonex,
+    "aurumpro": enrich_aurumpro_product_numbers,
 }
 
 # ---------------------------------------------------------------------------
