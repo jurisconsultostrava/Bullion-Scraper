@@ -995,17 +995,52 @@ def _is_aurumpro_url(product_url: str) -> bool:
 
 
 def _extract_aurumpro_product_number(html: str) -> str:
-    """Extract public AurumPro 'Kód produktu', not internal Upgates ID."""
-    soup = BeautifulSoup(html, "lxml")
-    page_text = soup.get_text(" ", strip=True)
-    m = _AURUMPRO_PRODUCT_CODE_RE.search(page_text)
-    if m:
-        return m.group(1).strip()
+    """Extract the public product code from the *main* AurumPro product detail.
 
-    simplified = re.sub(r"<[^>]+>", " ", html)
-    simplified = re.sub(r"\s+", " ", simplified)
-    m = _AURUMPRO_PRODUCT_CODE_RE.search(simplified)
-    return m.group(1).strip() if m else ""
+    AurumPro product pages can contain many ``.pd-code`` elements for related
+    products.  A page-wide regex can therefore return the code of a related
+    product.  The main product code is rendered directly after the main
+    ``h2.h1AddVariant`` heading and its code element also carries ``mb-2``.
+    """
+    soup = BeautifulSoup(html, "lxml")
+
+    def code_from_element(el) -> str:
+        if not el:
+            return ""
+        txt = el.get_text(" ", strip=True)
+        m = _AURUMPRO_PRODUCT_CODE_RE.search(txt)
+        return m.group(1).strip() if m else ""
+
+    # 1) Most reliable: main product heading -> first following .pd-code.
+    heading = soup.select_one("h2.h1AddVariant")
+    if heading:
+        el = heading.find_next("span", class_=lambda c: c and "pd-code" in c.split())
+        number = code_from_element(el)
+        if number:
+            return number
+
+    # 2) AurumPro currently marks the main detail code with mb-2.
+    number = code_from_element(soup.select_one("span.pd-code.mb-2"))
+    if number:
+        return number
+
+    # 3) Safe fallback only when there is exactly one product-code element.
+    code_elements = soup.select("span.pd-code")
+    if len(code_elements) == 1:
+        number = code_from_element(code_elements[0])
+        if number:
+            return number
+
+    # 4) Last resort: search a narrow area around the main heading, not the
+    #    entire page, to avoid codes from recommendation carousels.
+    if heading:
+        parent = heading.parent
+        if parent:
+            m = _AURUMPRO_PRODUCT_CODE_RE.search(parent.get_text(" ", strip=True))
+            if m:
+                return m.group(1).strip()
+
+    return ""
 
 
 def _fetch_aurumpro_product_number(product_url: str) -> str:
