@@ -1311,6 +1311,10 @@ def add_cors(response):
 def index():
     return render_template("index.html")
 
+@app.route("/favicon.ico")
+def favicon():
+    return Response(status=204)
+
 @app.route("/health")
 def health():
     return jsonify({"ok": True, "service": "bullion-multi-scraper", "version": "v1"})
